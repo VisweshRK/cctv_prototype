@@ -4,7 +4,7 @@ Setup and the full team rules are in [docs/TEAM_GUIDE.md](docs/TEAM_GUIDE.md). T
 
 ## Taking a use case
 
-1. Pick an open slot from the table in [README.md](README.md) and tell the team.
+1. Find your slot in the owner table in [README.md](README.md).
 2. Create a branch for it (the slot's folder name):
    ```bash
    git switch -c usecase/intrusion
@@ -12,7 +12,7 @@ Setup and the full team rules are in [docs/TEAM_GUIDE.md](docs/TEAM_GUIDE.md). T
 3. Work only inside your slot folder `ai/plugins/<slot>/` and your tests `ai/tests/test_<slot>.py`.
    If you need a change in shared code (`ai/cctv_ai/`, `internal/cctv/`, `go2rtc.yaml`), make it a
    separate, small PR so others can review it.
-4. Open a pull request into `main`. Add your name to the Owner column in README.md in that PR.
+4. Open a pull request into `main`.
 
 `main` is protected: changes go in through pull requests with passing CI.
 
@@ -35,6 +35,9 @@ In short:
   link in your slot README instead.
 - **No faces or footage in git** except small test samples you have permission to use.
 - New Python packages go in `ai/requirements.txt` with a minimum version.
+- **Models and libraries must be MIT, Apache 2.0 or BSD.** No Ultralytics YOLOv5/v8/v11 (AGPL) or
+  YOLOv9 (GPL). Put the model's name, link and licence in your slot README.
+- Don't build your own person/car detector: use the shared one in `ai/cctv_ai/` (see the team guide).
 - Frigate is MIT-licensed. If you copy a piece of its code (not only the idea), keep its copyright
   line in a comment above it and mention it in your PR.
 

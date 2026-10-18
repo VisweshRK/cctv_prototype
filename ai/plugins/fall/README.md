@@ -12,7 +12,8 @@ Detect a person falling and staying on the floor (elderly care).
 - No fall detection in Frigate. Reuse its idea of running the heavy model only on `person` boxes from the tracker.
 
 ## Suggested approach
-1. Pose model (e.g. YOLO-pose or MoveNet in ONNX) on each person crop.
+1. Pose model on each `person` box from the shared detector, e.g. MoveNet or RTMPose in ONNX (both Apache 2.0).
+   Not YOLO-pose from Ultralytics: it is AGPL.
 2. Fall = body angle goes from upright to horizontal quickly, then the person stays down for a few seconds.
 3. Keep a short per-person history (last ~2 s of keypoints) to tell a fall from lying down slowly.
 
