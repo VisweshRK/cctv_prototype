@@ -101,6 +101,10 @@ owned by **Viswesh**, who also helps P2 with models. Changes there go through Vi
 [docs/frigate-teardown.md](docs/frigate-teardown.md) explains how Frigate handles each use case and where
 we can be more efficient than Frigate.
 
+**Start here to build your use case:** [docs/plans/](docs/plans/README.md) has one step-by-step plan per
+person, and [docs/how-frigate-works.md](docs/how-frigate-works.md) explains the Frigate engine (motion,
+regions, tracker, scoring) that makes its detection fast and accurate.
+
 ## Tests
 
 ```bash

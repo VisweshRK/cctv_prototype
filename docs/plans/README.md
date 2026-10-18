@@ -1,0 +1,120 @@
+# Implementation plans
+
+One plan per person. Read [../how-frigate-works.md](../how-frigate-works.md) first: every plan reuses
+the same Frigate ideas (motion first, region crops, tracker, median score, zones, voting).
+
+| Plan | Who | Use cases |
+| --- | --- | --- |
+| [viswesh.md](viswesh.md) | Viswesh | Video pipeline, shared detector + tracker, camera tampering, model help for P2 |
+| [p1-mohanraj.md](p1-mohanraj.md) | P1 Mohanraj | Fire and smoke, electricity used when nobody is there, baby crying |
+| [p2-krithick.md](p2-krithick.md) | P2 Krithick | Face recognition, vehicle + licence plate |
+| [p3-p4-sanjay-kishore.md](p3-p4-sanjay-kishore.md) | P3 Sanjay + P4 Kishore | Intrusion, restricted area, occupancy, fall |
+
+## The architecture everyone builds on
+
+```
+go2rtc ──restream──> frame reader (ffmpeg, 5 fps, raw BGR) ──> motion ──> regions ──> shared detector (YOLOX)
+                                                                                         │
+                                                       filters + per-label NMS ──> tracker (Norfair, Kalman)
+                                                                                         │
+                                                      TrackedObject list (id, label, box, median score, ...)
+                                                                                         │
+      ┌──────────────┬──────────────┬───────────────┬───────────────┬──────────────────┬─┴─────────────┐
+   intrusion   restricted_area   occupancy        fall       power_when_absent   face_recognition  vehicle_lpr
+   (zones)        (zones)        (counts)        (pose)       (counts + lights)   (YuNet + SFace)   (OCR)
+
+   raw frame ──> tampering, fire          audio (16 kHz) ──> baby_crying (YAMNet)
+```
+
+Rules that make this work:
+
+- **One detector for everyone.** Plugins never run their own person/car detector.
+- **Plugins get tracked objects, not raw boxes.** A tracked object has a stable `id`, so "one event
+  per object" is easy and one-frame ghosts never reach your code.
+- **Only act on `true_positive` objects** (median of the last 10 scores ≥ 0.7, like Frigate).
+- **Heavy models only on objects, with attempt limits** (face, plate, pose), never on every frame.
+
+## Shared contract (code against this now)
+
+Until Viswesh's pipeline lands, write your logic against these shapes and test it with hand-made
+objects. The names below are the contract; Viswesh will not change them without telling everyone.
+
+```python
+# ai/cctv_ai/objects.py (Viswesh)
+@dataclass
+class TrackedObject:
+    id: str                       # "cam1-17": same id while the tracker follows this object
+    label: str                    # "person", "car", "motorcycle", "bus", "truck", ...
+    box: tuple[int, int, int, int]  # x1, y1, x2, y2 in pixels of the frame you are given
+    score: float                  # this frame's score (0 if predicted, not detected)
+    median_score: float           # median of the last 10 scores (missed frames count as 0)
+    true_positive: bool           # median_score has reached 0.7 at least once
+    stationary: bool              # has not moved for a while (still tracked, not re-detected)
+    motionless_count: int         # frames in a row without moving
+    first_seen: datetime
+    last_seen: datetime
+    history: list[tuple[int, int, int, int]]  # last ~25 boxes (about 5 s at 5 fps), oldest first
+
+# ai/cctv_ai/plugin.py: new hook (on_frame and on_audio stay as they are)
+class Plugin:
+    needs = {"objects"}           # ask for tracked objects
+    def on_objects(self, camera: str, frame: np.ndarray, ts: datetime,
+                   objects: list[TrackedObject], ended: list[TrackedObject]) -> list[Event]:
+        """objects = tracked now; ended = objects the tracker lost since the last call."""
+        return []
+```
+
+Zones live in `ai/zones.yaml` (committed: it holds no secrets). Points are fractions of the frame
+width and height, so they still work if the resolution changes:
+
+```yaml
+cam1:
+  door:
+    points: [[0.10, 0.55], [0.45, 0.55], [0.45, 1.0], [0.10, 1.0]]
+    objects: [person]
+    inertia: 3            # frames inside before "entered" (Frigate default)
+    loitering_time: 0     # seconds; 0 = alert on entry
+```
+
+The zone helper `ai/cctv_ai/zones.py` is written by P3 + P4 as a small shared-code PR reviewed by
+Viswesh, because intrusion, restricted area, occupancy and power_when_absent all use it.
+
+## Order of work
+
+| Step | Viswesh | P1 | P2 | P3 + P4 |
+| --- | --- | --- | --- | --- |
+| 1 | Frame reader at 5 fps, metrics | Baby crying (needs only audio, starts now) | Face gallery + SFace matching on photos | `zones.py` + zone drawing tool, hand-made-object tests |
+| 2 | Motion + regions + YOLOX detector | Fire model choice + dataset + training | Plate OCR on still photos of plates | Intrusion + restricted area logic |
+| 3 | Tracker + `TrackedObject` + `on_objects` hook | Lights-on detector for power_when_absent | Per-track voting (faces, plates) | Occupancy counts, fall pose features |
+| 4 | Tampering plugin; camera hookup | Plug into tracked objects | Plug into tracked objects | Plug into tracked objects, tune on real clips |
+| 5 | Performance pass with all plugins on | Tune thresholds on clips | Tune thresholds on clips | Tune thresholds on clips |
+
+Step 1 for everyone except Viswesh needs no detector. Nobody waits.
+
+## Shared tech stack
+
+| Need | Use | Licence |
+| --- | --- | --- |
+| Model runtime | `onnxruntime` (CPU; try the OpenVINO or DirectML build later) | MIT |
+| Image code | `opencv-python` | Apache 2.0 |
+| Object detector | YOLOX-Tiny / YOLOX-S ONNX from Megvii | Apache 2.0 |
+| Tracker | `norfair` (what Frigate uses) | BSD-3 |
+| Config | `pyyaml` | MIT |
+| Faces | OpenCV Zoo YuNet + SFace | MIT / Apache 2.0 |
+| Plates OCR | RapidOCR (PaddleOCR models in ONNX) | Apache 2.0 |
+| Pose (fall) | RTMPose via `rtmlib`, or MoveNet | Apache 2.0 |
+| Audio | YAMNet converted to ONNX | Apache 2.0 |
+| String matching | `rapidfuzz` (Jaro-Winkler, Levenshtein) | MIT |
+
+Each person adds their packages to `ai/requirements.txt` in their own PR, with a minimum version.
+
+## What "done" means for every use case
+
+On top of the checklist in [../TEAM_GUIDE.md](../TEAM_GUIDE.md) section 6:
+
+- **Accuracy:** test on at least 3 clips that show the incident and 3 that don't. Write the
+  results (hits, misses, false alarms) in your folder README.
+- **Speed:** your plugin's time per call is logged by the worker. Keep it under 30 ms on average
+  (heavy models: under 100 ms, and only on objects).
+- **Fast response:** the event reaches `/api/cctv/events` within 2 s of the incident starting
+  (intrusion and fire: within 1 s once the pipeline runs at 5 fps).

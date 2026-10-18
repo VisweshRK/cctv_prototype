@@ -187,5 +187,6 @@ list, and test it with hand-made boxes.
 
 - Something broken in setup, the worker or go2rtc: ask in the group with the error text (a screenshot
   of the terminal is fine; hide camera addresses).
+- Your step-by-step plan: [plans/](plans/README.md). How Frigate's engine works: [how-frigate-works.md](how-frigate-works.md).
 - Background on how Frigate does each use case: [frigate-teardown.md](frigate-teardown.md).
 - More detail: [README.md](../README.md), [ai/README.md](../ai/README.md), [CONTRIBUTING.md](../CONTRIBUTING.md).
