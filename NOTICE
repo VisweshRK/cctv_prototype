@@ -1,0 +1,22 @@
+CCTV Prototype
+Copyright (c) 2026 VisweshRK and contributors
+
+This project is a modified copy of go2rtc:
+  https://github.com/AlexxIT/go2rtc
+  Copyright (c) 2022 Alexey Khit
+  MIT License (see LICENSE)
+  Based on upstream commit c245815 (master, after release v1.9.14).
+
+Changes from upstream go2rtc:
+  - main.go: loads .env and registers the "cctv" module
+  - internal/cctv/: new module (camera status, tampering/disconnect events, events API)
+  - ai/: new Python AI worker and use-case plugin slots
+  - go2rtc.yaml, .env.example, docs/, CONTRIBUTING.md, README.md, CI workflow
+  - the original README.md was renamed to README.go2rtc.md
+
+Ideas and design notes come from Frigate (no Frigate code is copied):
+  https://github.com/blakeblackshear/frigate
+  Copyright (c) 2026 Frigate, Inc.
+  MIT License
+
+Our own code is released under the MIT License, the same terms as LICENSE.

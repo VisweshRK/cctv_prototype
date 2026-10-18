@@ -1,0 +1,4 @@
+# Base worker only. Each use case adds its own model libraries (e.g. onnxruntime) in its PR.
+numpy>=1.26
+opencv-python>=4.9
+requests>=2.31

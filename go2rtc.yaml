@@ -1,0 +1,32 @@
+# CCTV prototype config (committed to git).
+# Never put passwords here: camera addresses come from .env (copy .env.example to .env).
+# Each ${NAME} below is replaced with the value from .env when go2rtc starts.
+
+app:
+  # go2rtc modules to run. Remove this block to run every module.
+  modules: [api, ws, http, rtsp, webrtc, mp4, hls, mjpeg, mpegts, onvif, ffmpeg, exec, echo, expr, debug, cctv]
+
+api:
+  listen: ":1984"   # web UI + API: http://localhost:1984
+
+rtsp:
+  listen: ":8554"   # restream: rtsp://localhost:8554/cam1
+
+webrtc:
+  listen: ":8555"
+
+streams:
+  # Q-Tech Wi-Fi cameras (two-way audio). Fill CAM1_URL / CAM2_URL in .env.
+  cam1: ${CAM1_URL}
+  cam2: ${CAM2_URL}
+
+cctv:
+  cameras: [cam1, cam2]        # go2rtc stream names to watch
+  interval: 5s                 # how often camera status is checked
+  offline_after: 20s           # no new data for this long = camera offline
+  events_file: data/events.jsonl
+  max_events: 1000             # events kept in memory for the API
+
+log:
+  level: info
+  cctv: debug

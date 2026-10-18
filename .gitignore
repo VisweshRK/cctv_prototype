@@ -1,7 +1,7 @@
 .idea/
 .tmp/
 
-go2rtc.yaml
+# CCTV prototype: go2rtc.yaml is committed (it only holds ${VAR} placeholders)
 go2rtc.json
 
 go2rtc_freebsd*
@@ -22,3 +22,15 @@ website/.vitepress/dist
 node_modules
 package-lock.json
 CLAUDE.md
+# CCTV prototype
+.env
+.env.*
+!.env.example
+data/
+__pycache__/
+*.pyc
+.venv/
+ai/.venv/
+*.onnx
+*.pt
+*.tflite

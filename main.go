@@ -8,6 +8,7 @@ import (
 	"github.com/AlexxIT/go2rtc/internal/api/ws"
 	"github.com/AlexxIT/go2rtc/internal/app"
 	"github.com/AlexxIT/go2rtc/internal/bubble"
+	"github.com/AlexxIT/go2rtc/internal/cctv"
 	"github.com/AlexxIT/go2rtc/internal/debug"
 	"github.com/AlexxIT/go2rtc/internal/doorbird"
 	"github.com/AlexxIT/go2rtc/internal/dvrip"
@@ -54,6 +55,9 @@ import (
 func main() {
 	// version will be set later from -buildvcs info, this used only as fallback
 	app.Version = "1.9.14"
+
+	// CCTV prototype: load camera secrets from .env before go2rtc reads its config
+	cctv.LoadDotEnv(".env")
 
 	type module struct {
 		name string
@@ -113,6 +117,8 @@ func main() {
 		{"ngrok", ngrok.Init},
 		{"pinggy", pinggy.Init},
 		{"srtp", srtp.Init},
+		// CCTV prototype (must stay after streams)
+		{"cctv", cctv.Init}, // camera status, events API, tampering/disconnect
 	}
 
 	for _, m := range modules {
