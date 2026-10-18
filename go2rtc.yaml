@@ -20,6 +20,11 @@ streams:
   cam1: ${CAM1_URL}
   cam2: ${CAM2_URL}
 
+ffmpeg:
+  # Input template for using a video file as a fake camera (loops forever).
+  # In .env: CAM1_URL=ffmpeg:samples/test.mp4#input=loop#video=copy#audio=copy
+  loop: "-re -stream_loop -1 -i {input}"
+
 cctv:
   cameras: [cam1, cam2]        # go2rtc stream names to watch
   interval: 5s                 # how often camera status is checked

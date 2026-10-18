@@ -1,5 +1,7 @@
 # Contributing
 
+Setup and the full team rules are in [docs/TEAM_GUIDE.md](docs/TEAM_GUIDE.md). This page is the short version.
+
 ## Taking a use case
 
 1. Pick an open slot from the table in [README.md](README.md) and tell the team.

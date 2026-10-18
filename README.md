@@ -3,6 +3,8 @@
 A smart CCTV prototype for two Q-Tech Wi-Fi cameras with two-way audio, built on
 [go2rtc](https://github.com/AlexxIT/go2rtc) and taking ideas from [Frigate](https://github.com/blakeblackshear/frigate).
 
+**New to the team? Start with [docs/TEAM_GUIDE.md](docs/TEAM_GUIDE.md).**
+
 - **go2rtc (Go)** connects to each camera once and serves live view (web UI, WebRTC, RTSP restream).
 - **`internal/cctv` (Go, our module)** watches camera status, raises tampering/disconnect events, and
   stores all events behind a small HTTP API.
@@ -47,6 +49,8 @@ winget install Gyan.FFmpeg
    .venv\Scripts\python -m cctv_ai.worker -v
    ```
    By default only the working `example_motion` plugin runs. See [ai/README.md](ai/README.md).
+
+No camera? Use a video file as a fake camera: see [samples/README.md](samples/README.md).
 
 ## API (added by `internal/cctv`)
 

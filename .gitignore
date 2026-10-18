@@ -27,6 +27,8 @@ CLAUDE.md
 .env.*
 !.env.example
 data/
+samples/*
+!samples/README.md
 __pycache__/
 *.pyc
 .venv/
