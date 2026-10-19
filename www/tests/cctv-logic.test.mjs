@@ -5,7 +5,7 @@ import {spawnSync} from 'node:child_process';
 
 import {
     USE_CASES, describe, areaOf, detailOf, boxOf, esc, snapshotState, snapshotSrc, sirenText,
-    Incidents, summarize, simulated, timelineHours, barFractions, parseTime,
+    Incidents, queueList, summarize, simulated, timelineHours, barFractions, parseTime,
 } from '../cctv-logic.js';
 
 const ev = (fields) => ({
@@ -166,6 +166,10 @@ test('snapshotState: no waiting for cameras that went offline or came back', () 
 
 test('snapshotSrc: only the server snapshot URLs', () => {
     assert.equal(snapshotSrc(ev({snapshot: 'api/cctv/snapshot?id=7'})), 'api/cctv/snapshot?id=7');
+    // what the server sets: t makes the URL unique per store lifetime
+    const url = 'api/cctv/snapshot?id=7&t=1792404000123456789';
+    assert.equal(snapshotSrc(ev({snapshot: url})), url);
+    assert.equal(snapshotState(ev({snapshot: url}), Date.parse('2026-10-19T10:00:01Z')), 'ready');
     assert.equal(snapshotSrc(ev({})), '');
     assert.equal(snapshotSrc(ev({snapshot: ''})), '');
     assert.equal(snapshotSrc(ev({snapshot: 'http://evil.example/x.jpg'})), '');
@@ -183,6 +187,44 @@ test('sirenText', () => {
     assert.equal(sirenText(ev({use_case: 'fire', camera: 'cam2', siren: 'ringing'})), 'ringing on cam2');
     assert.equal(sirenText(ev({use_case: 'fall', siren: 'ringing'})), ''); // no siren for this use case
     assert.equal(sirenText(ev({use_case: 'nope'})), '');
+});
+
+test('queueList: after reload, unacked non-ringing popups are queued; only ringing ones pop', () => {
+    const list = [ // as GET api/cctv/events gives it: newest first
+        ev({id: 6, use_case: 'occupancy', label: 'count'}), // feed only
+        ev({id: 5, use_case: 'fall', label: 'fall'}), // popup, no siren
+        ev({id: 4, siren: 'ringing'}),
+        ev({id: 3, use_case: 'fire', label: 'smoke', acknowledged_at: '2026-10-19T10:01:00Z'}),
+        ev({id: 2, siren: 'stopped'}), // e.g. cut off at the siren maximum
+        ev({id: 1, siren: 'unavailable', camera: 'cam2'}),
+    ];
+
+    // no ringing event: everything unacked is queued, nothing pops
+    const quiet = new Incidents();
+    assert.equal(queueList(quiet, list.filter((e) => e.id !== 4)), false);
+    assert.deepEqual(quiet.ids('cam1|intrusion'), [2]);
+    assert.deepEqual(quiet.ids('cam2|intrusion'), [1]);
+    assert.deepEqual(quiet.ids('cam1|fall'), [5]);
+    assert.deepEqual(quiet.ids('cam1|fire'), []);
+    assert.equal(quiet.groupOf(6), null);
+
+    // a ringing event pops, and its group is the current one
+    const q = new Incidents();
+    assert.equal(queueList(q, list), true);
+    assert.equal(q.current().key, 'cam1|intrusion');
+    // Acknowledge on that group sends every id in it, so the camera's siren
+    // cut-off (pending until all its siren events are acked) can clear
+    assert.deepEqual(q.ids(q.current().key), [2, 4]);
+    assert.equal(q.others(), 2);
+
+    // a reload of the same list doesn't pop again
+    assert.equal(queueList(q, list), false);
+    assert.deepEqual(q.ids('cam1|intrusion'), [2, 4]);
+
+    // acks seen in a later list leave the queue
+    const acked = list.map((e) => ({...e, acknowledged_at: '2026-10-19T10:05:00Z'}));
+    assert.equal(queueList(q, acked), false);
+    assert.equal(q.current(), null);
 });
 
 test('Incidents: groupOf finds the group of an event id', () => {
@@ -446,4 +488,27 @@ test('simulated', () => {
     // each call returns fresh objects
     simulated(0, cams).data.box[0] = 0.99;
     assert.deepEqual(simulated(0, cams), a);
+});
+
+test('simulated: picks a camera configured for the use case', () => {
+    // as in /api/cctv/status: cam2 has no restricted_area, nobody has fire
+    const cams = [
+        {name: 'cam1', use_cases: ['intrusion', 'restricted_area', 'tampering']},
+        {name: 'cam2', use_cases: ['intrusion', 'vehicle_lpr', 'face_recognition', 'tampering']},
+    ];
+    for (let i = 0; i < 24; i++) {
+        const s = simulated(i, cams);
+        const fit = cams.filter((c) => c.use_cases.includes(s.use_case)).map((c) => c.name);
+        if (fit.length) assert.ok(fit.includes(s.camera), `${i}: ${s.use_case} on ${s.camera}`);
+        else assert.equal(s.camera, ['cam1', 'cam2'][i % 2], `${i}: round-robin for ${s.use_case}`);
+    }
+    assert.equal(simulated(1, cams).camera, 'cam1'); // restricted_area: only cam1
+    assert.equal(simulated(7, cams).camera, 'cam1');
+    assert.equal(simulated(5, cams).camera, 'cam2'); // vehicle_lpr: only cam2
+    // a use case on several cameras takes turns between them
+    assert.deepEqual([0, 6, 12, 18].map((i) => simulated(i, cams).camera), ['cam1', 'cam2', 'cam1', 'cam2']);
+
+    // no use cases known (status not loaded yet, or bad entries): round-robin by name
+    assert.equal(simulated(1, [{name: 'cam1'}, {name: 'cam2', use_cases: 'x'}]).camera, 'cam2');
+    assert.equal(simulated(1, [null, {name: ''}, {name: 'cam3', use_cases: []}]).camera, 'cam3');
 });

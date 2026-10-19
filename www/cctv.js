@@ -3,7 +3,7 @@
 // textContent (see el()), never through innerHTML.
 import './video-stream.js';
 import {
-    USE_CASES, describe, areaOf, detailOf, boxOf, snapshotState, snapshotSrc, sirenText, Incidents,
+    USE_CASES, describe, areaOf, detailOf, boxOf, snapshotState, snapshotSrc, sirenText, Incidents, queueList,
     summarize, simulated, timelineHours, barFractions, parseTime,
 } from './cctv-logic.js';
 
@@ -91,6 +91,7 @@ function describeTile(t, place, useCases) {
     if (key === t.key) return;
     t.key = key;
     t.place = place;
+    t.useCases = useCases; // Simulate sends each use case to a camera configured for it
 
     t.sub.textContent = place ? `· ${place}` : '';
 
@@ -418,6 +419,8 @@ let listLoaded = false; // a list has loaded at least once; the numbers wait for
  * GET api/cctv/events?limit=50 into the feed. Pushes that arrive meanwhile
  * are held and replayed afterwards, so a list fetched a moment too early
  * can't undo them. Old events don't pop up, except a siren still ringing.
+ * A reload asked for while one fails still runs; after a failure with none
+ * asked for, the stream's next open retries.
  */
 async function loadFeed() {
     if (listLoading) {
@@ -429,15 +432,17 @@ async function loadFeed() {
     try {
         do {
             listAgain = false;
-            const r = await fetch('api/cctv/events?limit=50', {cache: 'no-cache', signal: AbortSignal.timeout(FETCH_TIMEOUT)});
-            if (!r.ok) throw new Error(`HTTP ${r.status}`);
-            const list = await r.json();
-            if (!Array.isArray(list)) throw new Error('events is not a list');
-            applyList(list.filter(isEvent));
-        } while (listAgain);
-    } catch (err) {
-        console.warn('[cctv] alert list unavailable:', err);
-        if (rows.size === 0) feedEmpty.textContent = 'Alert list unavailable';
+            try {
+                const r = await fetch('api/cctv/events?limit=50', {cache: 'no-cache', signal: AbortSignal.timeout(FETCH_TIMEOUT)});
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                const list = await r.json();
+                if (!Array.isArray(list)) throw new Error('events is not a list');
+                applyList(list.filter(isEvent));
+            } catch (err) {
+                console.warn('[cctv] alert list unavailable:', err);
+                if (rows.size === 0) feedEmpty.textContent = 'Alert list unavailable';
+            }
+        } while (listAgain); // a failed load doesn't drop a reload queued meanwhile
     } finally {
         const replay = held;
         held = null;
@@ -452,17 +457,9 @@ function applyList(list) {
     for (const e of list) known.set(e.id, e);
     feedEmpty.textContent = 'No alerts yet';
     renderFeed();
-
-    let pop = false;
-    for (const e of [...known.values()].sort((a, b) => a.id - b.id)) { // oldest first: the newest ends current
-        if (e.siren === 'ringing' && !isAcked(e)) {
-            if (!incidents.groupOf(e.id)) pop = true;
-            incidents.add(e);
-        } else {
-            incidents.update(e); // catches acks missed while disconnected
-        }
-    }
-    alertsChanged(pop);
+    // every unacknowledged popup event is queued (so a group's Acknowledge
+    // acks all of it); only a siren still ringing pops up
+    alertsChanged(queueList(incidents, [...known.values()]));
 }
 
 function onPush(type, e) {
@@ -617,6 +614,7 @@ function renderSnap(e) {
         const loaded = img.complete && img.naturalWidth > 0;
         const failed = Boolean(img.dataset.failed);
         img.hidden = !loaded;
+        $('m-rec').hidden = !loaded; // the SNAPSHOT badge only next to a picture
         snap.classList.toggle('loading', !loaded && !failed);
         msg.textContent = failed ? 'No snapshot available' : '';
         if (loaded) placeBox(e);
@@ -625,6 +623,7 @@ function renderSnap(e) {
     }
 
     img.hidden = true;
+    $('m-rec').hidden = true;
     img.removeAttribute('src');
     delete img.dataset.failed;
     $('m-box').hidden = true;
@@ -667,6 +666,7 @@ $('m-img').addEventListener('load', () => {
     if (!shown) return;
     const img = $('m-img');
     img.hidden = false;
+    $('m-rec').hidden = false;
     $('m-snap').classList.remove('loading');
     $('m-snap-msg').textContent = '';
     placeBox(shown.latest);
@@ -677,6 +677,7 @@ $('m-img').addEventListener('error', () => {
     if (!img.getAttribute('src')) return; // src removed on purpose
     img.dataset.failed = '1';
     img.hidden = true;
+    $('m-rec').hidden = true;
     $('m-box').hidden = true;
     $('m-snap').classList.remove('loading');
     $('m-snap-msg').textContent = 'No snapshot available';
@@ -818,7 +819,8 @@ function renderUseCases(perUseCase) {
  * popup and numbers follow from the server's push like for any alert.
  */
 async function simulate() {
-    const body = simulated(simNext++, [...tiles.keys()]);
+    const cameras = [...tiles].map(([name, t]) => ({name, use_cases: t.useCases || []}));
+    const body = simulated(simNext++, cameras);
     try {
         const r = await fetch('api/cctv/events', {
             method: 'POST',

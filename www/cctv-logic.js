@@ -217,6 +217,31 @@ export class Incidents {
     }
 }
 
+/**
+ * Files a freshly loaded event list (page load, or a reconnect) into the
+ * queue. Every unacknowledged popup event joins it, so nothing that still
+ * needs an ack drops out after a reload, and acks or changes missed while
+ * disconnected are applied. Only a siren still ringing should pop up: it
+ * returns true if one wasn't queued before, and ringing groups are filed
+ * last, so current() is then a ringing group.
+ * @param {Incidents} incidents
+ * @returns {boolean} whether to open the popup
+ */
+export function queueList(incidents, events) {
+    const oldestFirst = [...events].sort((a, b) => a.id - b.id); // the newest group ends current
+    const ringing = (e) => e.siren === 'ringing' && !isAcked(e) && describe(e).popup;
+    for (const e of oldestFirst) {
+        if (!ringing(e)) incidents.add(e); // add() updates a queued id, ignores acked and feed-only ones
+    }
+    let pop = false;
+    for (const e of oldestFirst) {
+        if (!ringing(e)) continue;
+        if (!incidents.groupOf(e.id)) pop = true;
+        incidents.add(e);
+    }
+    return pop;
+}
+
 // The start of n's local clock hour, in ms. Not setMinutes(0): in a DST
 // fall-back hour that picks the earlier of the two instants.
 function hourStartOf(n) {
@@ -295,13 +320,22 @@ const CYCLE = [
 /**
  * A POST /api/cctv/events body like an AI worker would send, deterministic
  * per i. The server fills id and time.
+ *
+ * cameras are {name, use_cases} as in /api/cctv/status (a plain name also
+ * works). The event goes to a camera configured for its use case, taking
+ * turns if there are several; if none is, round-robin over all of them.
  */
 export function simulated(i, cameras) {
-    const cams = Array.isArray(cameras) ? cameras : [];
+    const cams = (Array.isArray(cameras) ? cameras : [])
+        .map((x) => (typeof x === 'string' ? {name: x} : x))
+        .filter((x) => x && nonEmpty(x.name));
     const c = CYCLE[mod(i, CYCLE.length)];
+    const fit = cams.filter((x) => Array.isArray(x.use_cases) && x.use_cases.includes(c.use_case));
+    const camera = fit.length ? fit[mod(Math.floor(i / CYCLE.length), fit.length)].name
+        : cams.length ? cams[mod(i, cams.length)].name : 'cam1';
     const wobble = mod(i * 7, 5) / 100; // 0..0.04, so repeated alerts differ a bit
     return {
-        camera: cams.length ? cams[mod(i, cams.length)] : 'cam1',
+        camera,
         use_case: c.use_case,
         label: c.label,
         confidence: Math.round((c.confidence + wobble - 0.02) * 100) / 100,
