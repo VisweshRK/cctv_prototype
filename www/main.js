@@ -130,6 +130,7 @@ document.body.innerHTML = `
         <a href="config.html">config</a>
         <a href="log.html">log</a>
         <a href="net.html">net</a>
+        <a href="cctv.html">cctv</a>
     </nav>
 </header>
 ` + document.body.innerHTML;

@@ -12,6 +12,8 @@ import (
 // CameraStatus is what /api/cctv/status returns for each camera.
 type CameraStatus struct {
 	Name      string    `json:"name"`
+	Place     string    `json:"place,omitempty"`     // where the camera is, from cctv.names
+	UseCases  []string  `json:"use_cases,omitempty"` // configured use cases, from cctv.use_cases
 	Online    bool      `json:"online"`
 	BytesRecv int       `json:"bytes_recv"`
 	LastSeen  time.Time `json:"last_seen,omitempty"` // last time new data arrived
@@ -65,6 +67,16 @@ func newWatcher(names []string, interval, offlineAfter time.Duration, events *ev
 		w.cameras = append(w.cameras, &camera{CameraStatus: CameraStatus{Name: name}})
 	}
 	return w
+}
+
+// describe sets each camera's place name and configured use cases.
+func (w *watcher) describe(places map[string]string, useCases map[string][]string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, c := range w.cameras {
+		c.Place = places[c.Name]
+		c.UseCases = append([]string(nil), useCases[c.Name]...)
+	}
 }
 
 func (w *watcher) run() {

@@ -240,6 +240,23 @@ func TestWatcherEmitsTamperingEvents(t *testing.T) {
 	require.Empty(t, events.list("", "", 10)) // startup state is not an event
 }
 
+func TestStatusIncludesPlaceAndUseCases(t *testing.T) {
+	w := newWatcher([]string{"cam1"}, time.Second, time.Second, newEventStore("", 10))
+	useCases := map[string][]string{"cam1": {"intrusion"}}
+	w.describe(map[string]string{"cam1": "Front corridor"}, useCases)
+	useCases["cam1"][0] = "changed" // the watcher keeps its own copy
+
+	rec := httptest.NewRecorder()
+	w.apiStatus(rec, httptest.NewRequest("GET", "/api/cctv/status", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var out []map[string]any // still a JSON array
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	require.Equal(t, "Front corridor", out[0]["place"])
+	require.Equal(t, []any{"intrusion"}, out[0]["use_cases"])
+}
+
 func TestStreamSendsAlertsAndPings(t *testing.T) {
 	defer func(d time.Duration) { pingEvery = d }(pingEvery)
 	pingEvery = 50 * time.Millisecond
