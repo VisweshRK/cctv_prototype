@@ -323,3 +323,66 @@ func TestStreamSendsAlertsAndPings(t *testing.T) {
 		return len(s.subs) == 0
 	}, time.Second, 10*time.Millisecond)
 }
+
+func TestAckEndpoint(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	s := newEventStore(path, 10)
+	e1, _ := s.add(Event{Camera: "cam1", UseCase: "intrusion", Label: "person", Confidence: 0.9})
+	_, _ = s.add(Event{Camera: "cam1", UseCase: "intrusion", Label: "person", Confidence: 0.8})
+	s.update(e1.ID, func(e *Event) { e.Siren = sirenRinging })
+	var acked []int64
+	s.onAck = func(e Event) { acked = append(acked, e.ID) }
+
+	ack := func(method, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, "/api/cctv/events/ack", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		s.apiAck(w, r)
+		return w
+	}
+	decode := func(w *httptest.ResponseRecorder) []Event {
+		var got []Event
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got), w.Body.String())
+		return got
+	}
+	fileLines := func() int {
+		b, err := os.ReadFile(path)
+		require.NoError(t, err)
+		return strings.Count(string(b), "\n")
+	}
+
+	w := ack("POST", `{"ids":[1,2]}`)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	got := decode(w)
+	require.Len(t, got, 2)
+	require.Equal(t, int64(1), got[0].ID)
+	require.Equal(t, int64(2), got[1].ID)
+	require.NotNil(t, got[0].AcknowledgedAt)
+	require.NotNil(t, got[1].AcknowledgedAt)
+	require.Equal(t, sirenStopped, got[0].Siren) // was ringing
+	require.Equal(t, "", got[1].Siren)           // wasn't ringing, left alone
+	require.Equal(t, []int64{1, 2}, acked)
+	first := *got[0].AcknowledgedAt
+
+	// already acknowledged: first time kept, no hook, no redundant file line
+	lines := fileLines()
+	w = ack("POST", `{"id":1}`)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	got = decode(w)
+	require.Len(t, got, 1)
+	require.True(t, first.Equal(*got[0].AcknowledgedAt))
+	require.Equal(t, []int64{1, 2}, acked)
+	require.Equal(t, lines, fileLines())
+
+	// some ids unknown: the known ones are returned
+	w = ack("POST", `{"ids":[2,99]}`)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	got = decode(w)
+	require.Len(t, got, 1)
+	require.Equal(t, int64(2), got[0].ID)
+
+	require.Equal(t, http.StatusNotFound, ack("POST", `{"id":99}`).Code)
+	require.Equal(t, http.StatusBadRequest, ack("POST", `{}`).Code)
+	require.Equal(t, http.StatusBadRequest, ack("POST", `{"ids":[]}`).Code)
+	require.Equal(t, http.StatusBadRequest, ack("POST", `not json`).Code)
+	require.Equal(t, http.StatusMethodNotAllowed, ack("GET", "").Code)
+}
