@@ -4,6 +4,7 @@
 import './video-stream.js';
 import {
     USE_CASES, describe, areaOf, detailOf, boxOf, snapshotState, snapshotSrc, sirenText, Incidents,
+    summarize, simulated, timelineHours, barFractions, parseTime,
 } from './cctv-logic.js';
 
 const STATUS_EVERY = 5000; // ms between GET api/cctv/status
@@ -239,8 +240,6 @@ const isEvent = (e) => e !== null && typeof e === 'object' && Number.isFinite(e.
 const isAcked = (e) => Boolean(e.acknowledged_at);
 const newestFirst = (a, b) => b.id - a.id;
 
-// Go writes nanoseconds; keep milliseconds so every browser parses it.
-const parseTime = (t) => Date.parse(typeof t === 'string' ? t.replace(/(\.\d{3})\d+/, '$1') : '');
 const pad = (n) => String(n).padStart(2, '0');
 
 function hms(t) {
@@ -353,7 +352,10 @@ function feedRow(e, isNew) {
     return row;
 }
 
-/** Empty state and the unacknowledged count in the panel header. */
+/**
+ * Empty state and the unacknowledged count in the panel header, then the
+ * dashboard numbers. Every change to known (list, alert, update, ack) ends here.
+ */
 function feedChanged() {
     if (rows.size === 0 && !feedEmpty.isConnected) feed.replaceChildren(feedEmpty);
     if (rows.size > 0) feedEmpty.remove();
@@ -363,6 +365,7 @@ function feedChanged() {
     const count = $('feed-count');
     count.hidden = unacked === 0;
     count.textContent = `${unacked} unacknowledged`;
+    renderNumbers();
 }
 
 function renderFeed() {
@@ -409,6 +412,7 @@ function feedReplace(e) {
 let held = null; // push messages held back while the list loads, replayed after it
 let listLoading = false;
 let listAgain = false;
+let listLoaded = false; // a list has loaded at least once; the numbers wait for it
 
 /**
  * GET api/cctv/events?limit=50 into the feed. Pushes that arrive meanwhile
@@ -443,6 +447,7 @@ async function loadFeed() {
 }
 
 function applyList(list) {
+    listLoaded = true;
     known.clear();
     for (const e of list) known.set(e.id, e);
     feedEmpty.textContent = 'No alerts yet';
@@ -583,8 +588,10 @@ function renderPopup() {
     sirenEl.parentElement.hidden = siren === '';
 
     const ids = p.ackIds.join(',');
+    // an old "Could not acknowledge" is for that one view: drop it on opening or on another incident
+    if (ackError && (opening || ackError.ids !== ids)) ackError = null;
     const ms = reachedIn.get(e.id);
-    $('m-hint').textContent = ackError && ackError.ids === ids ? ackError.msg
+    $('m-hint').textContent = ackError ? ackError.msg
         : ms !== undefined ? `Reached screen ${(ms / 1000).toFixed(1)} s after the incident`
             : isAcked(e) ? `Acknowledged at ${hms(e.acknowledged_at)}` : '';
     $('m-ack').hidden = p.ackIds.length === 0;
@@ -754,14 +761,91 @@ document.addEventListener('keydown', (ev) => {
 // Numbers, timeline, simulate (Task 10)
 // ---------------------------------------------------------------------------
 
+const NUMBERS_EVERY = 60000; // ms; "today" and the hour buckets move on without new events
+const demo = params.get('demo') === '1';
+const simButton = $('simulate');
+const simError = $('simulate-error');
+let simNext = 0; // the i of the next simulated(i)
+
+/**
+ * The KPIs, the 12-hour timeline and today's per-use-case counts, from the
+ * feed's events (known). They stay '–' until a list has loaded: numbers from
+ * pushes alone would be incomplete. #kpi-online comes from the status poll.
+ */
+function renderNumbers() {
+    if (!listLoaded) return;
+    const now = new Date();
+    const s = summarize([...known.values()], now);
+    $('kpi-alerts').textContent = String(s.alertsToday);
+    $('kpi-unacked').textContent = String(s.unacked);
+    renderTimeline(s.timeline, timelineHours(now));
+    renderUseCases(s.perUseCase);
+}
+
+/** One bar per clock hour; the tallest is full height, an empty hour has none. */
+function renderTimeline(counts, hours) {
+    const fractions = barFractions(counts);
+    const bars = counts.map((n, i) => {
+        const bar = el('i', fractions[i] > 0 ? '' : 'zero');
+        bar.style.left = `calc(${(i + 0.5) * 100 / counts.length}% - 3px)`; // centred in its twelfth
+        bar.style.height = `calc((100% - 16px) * ${fractions[i]})`; // 6px bottom gap, 10px headroom
+        bar.title = `${pad(hours[i])}:00 · ${n} popup alert${n === 1 ? '' : 's'}`;
+        return bar;
+    });
+    if (counts.every((n) => n === 0)) bars.push(el('div', 'none', 'No popup alerts in the last 12 hours'));
+    $('timeline').replaceChildren(...bars);
+    $('timeline-ticks').replaceChildren(...hours.map((h) => el('span', '', `${pad(h)}:00`)));
+}
+
+/** "Today:" and a chip per use case, most alerts first. */
+function renderUseCases(perUseCase) {
+    const list = Object.entries(perUseCase).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const box = $('timeline-uc');
+    if (list.length === 0) {
+        box.replaceChildren(el('span', '', 'No popup alerts today'));
+        return;
+    }
+    box.replaceChildren(el('span', '', 'Today:'), ...list.map(([uc, n]) => {
+        const severity = Object.hasOwn(USE_CASES, uc) ? USE_CASES[uc].severity : 'info';
+        const chip = el('span', `uc sev-${severity}`);
+        chip.append(el('i'), useCaseTitle(uc), el('b', '', n));
+        return chip;
+    }));
+}
+
+/**
+ * POSTs the next test event, as an AI worker would. Nothing else: the feed,
+ * popup and numbers follow from the server's push like for any alert.
+ */
+async function simulate() {
+    const body = simulated(simNext++, [...tiles.keys()]);
+    try {
+        const r = await fetch('api/cctv/events', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(FETCH_TIMEOUT),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        simError.hidden = true;
+        simError.textContent = '';
+    } catch (err) {
+        console.warn('[cctv] simulate failed:', err);
+        simError.textContent = 'Could not send the test alert';
+        simError.hidden = false;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
 
-$('simulate').hidden = params.get('demo') !== '1';
+simButton.hidden = !demo;
+if (demo) simButton.addEventListener('click', simulate);
 
 tick();
 setInterval(tick, 1000);
+setInterval(renderNumbers, NUMBERS_EVERY); // the only numbers timer; event changes redraw at once
 pollStatus();
 connect(); // its open event loads the alert list
 loadFeed();

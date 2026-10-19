@@ -5,7 +5,7 @@ import {spawnSync} from 'node:child_process';
 
 import {
     USE_CASES, describe, areaOf, detailOf, boxOf, esc, snapshotState, snapshotSrc, sirenText,
-    Incidents, summarize, simulated,
+    Incidents, summarize, simulated, timelineHours, barFractions, parseTime,
 } from '../cctv-logic.js';
 
 const ev = (fields) => ({
@@ -143,6 +143,25 @@ test('snapshotState', () => {
     assert.equal(snapshotState(ev({}), t + 5000), 'loading');
     assert.equal(snapshotState(ev({}), t + 13000), 'none');
     assert.equal(snapshotState(ev({time: 'not a time'}), t), 'none');
+});
+
+test('parseTime: Go nanoseconds are cut to milliseconds', () => {
+    assert.equal(parseTime('2026-10-19T10:00:00.123456789+05:30'), Date.parse('2026-10-19T10:00:00.123+05:30'));
+    assert.equal(parseTime('2026-10-19T10:00:00Z'), Date.parse('2026-10-19T10:00:00Z'));
+    assert.ok(Number.isNaN(parseTime('not a time')));
+    assert.ok(Number.isNaN(parseTime(undefined)));
+    assert.ok(Number.isNaN(parseTime(5)));
+});
+
+test('snapshotState: no waiting for cameras that went offline or came back', () => {
+    const t = Date.parse('2026-10-19T10:00:00Z');
+    for (const label of ['camera_offline', 'camera_online']) {
+        assert.equal(snapshotState(ev({use_case: 'tampering', label}), t + 1000), 'none', label);
+        assert.equal(snapshotState(ev({use_case: 'intrusion', label}), t + 1000), 'none', label); // any use case
+        // a snapshot that arrives anyway (an image POSTed with the event) still shows
+        assert.equal(snapshotState(ev({label, snapshot: 'api/cctv/snapshot?id=1'}), t + 1000), 'ready', label);
+    }
+    assert.equal(snapshotState(ev({use_case: 'tampering', label: 'lens_covered'}), t + 1000), 'loading');
 });
 
 test('snapshotSrc: only the server snapshot URLs', () => {
@@ -332,7 +351,7 @@ test('summarize: DST fall-back hour (America/New_York)', (t) => {
     // TZ must be set before the process starts, so run the check in a child.
     // 2026-11-01 01:30 EST: 01:00-02:00 happens twice, now is in the second one.
     const code = `
-        const {summarize} = await import(${JSON.stringify(new URL('../cctv-logic.js', import.meta.url).href)});
+        const {summarize, timelineHours} = await import(${JSON.stringify(new URL('../cctv-logic.js', import.meta.url).href)});
         const now = Date.parse('2026-11-01T06:30:00Z');
         const ev = (time) => ({id: 1, camera: 'cam1', use_case: 'intrusion', label: 'person', confidence: 0.9, time});
         const s = summarize([
@@ -340,7 +359,8 @@ test('summarize: DST fall-back hour (America/New_York)', (t) => {
             ev('2026-11-01T05:40:00Z'), // 01:40 EDT, previous hour
             ev('2026-11-01T04:59:00Z'), // 00:59 EDT
         ], now);
-        console.log(JSON.stringify({offset: new Date(now).getTimezoneOffset(), timeline: s.timeline}));
+        console.log(JSON.stringify({offset: new Date(now).getTimezoneOffset(), timeline: s.timeline,
+            hours: timelineHours(now)}));
     `;
     const r = spawnSync(process.execPath, ['--no-warnings', '--input-type=module', '-e', code],
         {env: {...process.env, TZ: 'America/New_York'}, encoding: 'utf8'});
@@ -353,6 +373,28 @@ test('summarize: DST fall-back hour (America/New_York)', (t) => {
     assert.equal(out.timeline.length, 12);
     assert.ok(out.timeline.every(Number.isFinite), JSON.stringify(out.timeline));
     assert.deepEqual(out.timeline, [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1]);
+    assert.deepEqual(out.hours, [15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1, 1]); // 1 am twice
+});
+
+test('timelineHours: the local clock hour of each summarize() bucket', () => {
+    const now = new Date(2026, 9, 19, 14, 45, 0);
+    for (const n of [now, now.getTime()]) {
+        assert.deepEqual(timelineHours(n), [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+    }
+    // across midnight
+    assert.deepEqual(timelineHours(new Date(2026, 9, 19, 4, 0, 0)), [17, 18, 19, 20, 21, 22, 23, 0, 1, 2, 3, 4]);
+
+    // the bucket an event lands in starts at that bucket's label
+    const s = summarize([ev({time: new Date(2026, 9, 19, 9, 20, 0).toISOString()})], now);
+    assert.equal(timelineHours(now)[s.timeline.indexOf(1)], 9);
+});
+
+test('barFractions: the tallest bar is 1, an empty hour is 0', () => {
+    assert.deepEqual(barFractions([0, 2, 4, 1]), [0, 0.5, 1, 0.25]);
+    assert.deepEqual(barFractions([0, 0, 0]), [0, 0, 0]);
+    assert.deepEqual(barFractions([3]), [1]);
+    assert.deepEqual(barFractions([0, 0, 1]), [0, 0, 1]);
+    assert.deepEqual(barFractions([]), []);
 });
 
 test('simulated', () => {

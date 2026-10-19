@@ -214,6 +214,13 @@
             box-shadow: 0 6px 18px #4f8cff44;
         }
 
+        /* Task 10: a failed Simulate POST */
+        .sim-err {
+            color: var(--crit);
+            font-size: 12px;
+            white-space: nowrap;
+        }
+
         /* cameras */
         .main {
             grid-column: 2;
@@ -298,6 +305,11 @@
             aspect-ratio: auto;
             cursor: zoom-out;
             box-shadow: 0 0 0 100vmax #02040899;
+        }
+
+        /* an enlarged tile keeps the alarm glow (listed first, so it is drawn above the dimming) */
+        .tile.big.alarm {
+            box-shadow: 0 0 0 2px #ff4d5e66, 0 0 40px #ff4d5e55, 0 0 0 100vmax #02040899;
         }
 
         .hud {
@@ -713,13 +725,65 @@
             box-shadow: 0 0 10px var(--c);
         }
 
+        .track i.zero {
+            box-shadow: none; /* an empty hour: no bar at all */
+        }
+
+        .track .none {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--dim);
+            font-size: 11.5px;
+        }
+
         .ticks {
             display: flex;
-            justify-content: space-between;
             color: var(--dim);
             font-size: 10px;
             margin-top: 4px;
             min-height: 15px;
+        }
+
+        .ticks span {
+            flex: 1;
+            text-align: center; /* under its bar: one twelfth of the track each */
+        }
+
+        /* Task 10: popup alerts today, per use case */
+        .ucs {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 6px;
+            margin-top: 10px;
+            color: var(--muted);
+            font-size: 11.5px;
+        }
+
+        .ucs .uc {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 9px;
+            border-radius: 6px;
+            background: var(--panel2);
+            border: 1px solid var(--line);
+            white-space: nowrap;
+        }
+
+        .ucs .uc i {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: var(--c);
+        }
+
+        .ucs .uc b {
+            color: var(--text);
+            font-weight: 600;
         }
 
         .stages {
@@ -1015,6 +1079,12 @@
             color: #0b0f15;
         }
 
+        @media (max-width: 600px) {
+            .ticks span:nth-child(odd) {
+                visibility: hidden; /* every other hour label, keeping the current one */
+            }
+        }
+
         @media (max-width: 1200px) {
             .app {
                 grid-template-columns: 64px 1fr 300px;
@@ -1124,6 +1194,7 @@
             <div class="chip" id="armed"><b>–</b> use cases configured</div>
         </div>
         <div class="spacer"></div>
+        <span class="sim-err" id="simulate-error" role="status" hidden></span>
         <button class="sim" id="simulate" hidden>▶ Simulate alert</button>
         <div class="clock mono" id="clock"></div>
     </header>
@@ -1157,6 +1228,7 @@
                 <div class="l"><span>Last 12 hours</span><span>popup alerts per hour</span></div>
                 <div class="track" id="timeline"></div>
                 <div class="ticks" id="timeline-ticks"></div>
+                <div class="ucs" id="timeline-uc"></div>
             </div>
 
             <div class="pipe waiting" id="pipeline">

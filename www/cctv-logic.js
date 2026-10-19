@@ -27,6 +27,14 @@ const nonEmpty = (v) => typeof v === 'string' && v !== '';
 const mod = (a, n) => ((a % n) + n) % n; // never negative, unlike %
 
 /**
+ * An event time in ms, or NaN. Go writes nanoseconds; only milliseconds are
+ * kept, so every browser parses it.
+ */
+export function parseTime(t) {
+    return Date.parse(typeof t === 'string' ? t.replace(/(\.\d{3})\d+/, '$1') : '');
+}
+
+/**
  * How an event is shown. Titles are raw text: escape them when rendering.
  * @returns {{severity: string, title: string, popup: boolean, siren: boolean}}
  */
@@ -90,14 +98,19 @@ export function esc(s) {
     return String(s).replace(/[&<>"']/g, (c) => ESC[c]);
 }
 
+// Labels the server never grabs a frame for (internal/cctv/snapshots.go handle()).
+const NO_GRAB = new Set(['camera_offline', 'camera_online']);
+
 /**
  * "ready" if the event has a snapshot, "loading" for the first 12 s after
- * e.time (the server may still be grabbing a frame), else "none".
+ * e.time (the server may still be grabbing a frame), else "none". A camera
+ * that went offline or came back gets no grabbed frame, so it is "none" at once.
  * @param {number} now ms, e.g. Date.now()
  */
 export function snapshotState(e, now) {
     if (e.snapshot) return 'ready';
-    const t = Date.parse(e.time);
+    if (NO_GRAB.has(e.label)) return 'none';
+    const t = parseTime(e.time);
     if (Number.isNaN(t)) return 'none';
     return now - t < SNAPSHOT_WAIT ? 'loading' : 'none';
 }
@@ -204,6 +217,12 @@ export class Incidents {
     }
 }
 
+// The start of n's local clock hour, in ms. Not setMinutes(0): in a DST
+// fall-back hour that picks the earlier of the two instants.
+function hourStartOf(n) {
+    return n.getTime() - (n.getMinutes() * 60000 + n.getSeconds() * 1000 + n.getMilliseconds());
+}
+
 /**
  * Dashboard numbers over popup events only. "Today" is now's local calendar
  * date; timeline holds 12 local clock-hour counts, oldest first, the last one
@@ -214,8 +233,7 @@ export class Incidents {
 export function summarize(events, now) {
     const n = new Date(now);
     const nowMs = n.getTime();
-    // not setMinutes(0): in a DST fall-back hour that picks the earlier instant
-    const hourStart = nowMs - (n.getMinutes() * 60000 + n.getSeconds() * 1000 + n.getMilliseconds());
+    const hourStart = hourStartOf(n);
     const sameDay = (t) => {
         const d = new Date(t);
         return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate();
@@ -226,7 +244,7 @@ export function summarize(events, now) {
         if (!describe(e).popup) continue;
         if (!isAcked(e)) s.unacked++;
 
-        const t = Date.parse(e.time);
+        const t = parseTime(e.time);
         if (Number.isNaN(t)) continue;
         if (sameDay(t)) {
             s.alertsToday++;
@@ -236,6 +254,26 @@ export function summarize(events, now) {
         if (i >= 0 && i < 12 && t <= nowMs) s.timeline[i]++;
     }
     return s;
+}
+
+/**
+ * The local clock hour (0..23) at which each of summarize()'s 12 timeline
+ * buckets starts, oldest first; the last one is the current hour.
+ * @param {Date|number} now
+ */
+export function timelineHours(now) {
+    const start = hourStartOf(new Date(now));
+    return Array.from({length: 12}, (_, i) => new Date(start - (11 - i) * HOUR).getHours());
+}
+
+/**
+ * Bar heights as fractions 0..1: the largest count is 1, an empty bucket is 0
+ * (no minimum height), and all are 0 when every count is 0.
+ * @param {number[]} counts
+ */
+export function barFractions(counts) {
+    const max = Math.max(0, ...counts);
+    return counts.map((c) => (max > 0 && c > 0 ? c / max : 0));
 }
 
 // What "Simulate alert" cycles through: one popup event per use case.
