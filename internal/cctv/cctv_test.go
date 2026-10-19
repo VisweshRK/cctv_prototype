@@ -93,6 +93,39 @@ func TestEventsAPI(t *testing.T) {
 	require.Equal(t, int64(3), e.ID)
 }
 
+// siren, acknowledged_at and snapshot belong to the server (review M1).
+func TestPostIgnoresServerOwnedFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	s := newEventStore(path, 10)
+	w := postEvent(s, `{"id":77,"camera":"cam1","use_case":"intrusion","label":"person","confidence":0.9,`+
+		`"siren":"ringing","acknowledged_at":"2026-10-19T10:00:00Z","snapshot":"https://example.invalid/x.jpg"}`)
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+
+	var got Event
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	for _, e := range []Event{got, s.list("", "", 10)[0], newEventStore(path, 10).list("", "", 10)[0]} {
+		require.Equal(t, int64(1), e.ID)
+		require.Empty(t, e.Siren)
+		require.Nil(t, e.AcknowledgedAt)
+		require.Empty(t, e.Snapshot)
+	}
+}
+
+// data is capped at 64 KiB, below load()'s 1 MB line limit (review M2).
+func TestPostRejectsLargeData(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	s := newEventStore(path, 10)
+	big := strings.Repeat("x", 64<<10)
+	w := postEvent(s, `{"camera":"cam1","use_case":"intrusion","label":"person","confidence":0.9,"data":{"detail":"`+big+`"}}`)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "data must be at most 64 KiB")
+	require.Empty(t, s.list("", "", 10))
+
+	w = postEvent(s, `{"camera":"cam1","use_case":"intrusion","label":"person","confidence":0.9,"data":{"detail":"`+big[:60<<10]+`"}}`)
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	require.Len(t, newEventStore(path, 10).list("", "", 10), 1)
+}
+
 func TestEventStoreKeepsMax(t *testing.T) {
 	s := newEventStore("", 3)
 	for i := 0; i < 5; i++ {
@@ -206,8 +239,8 @@ func TestCameraUpdate(t *testing.T) {
 	require.False(t, c.Online)
 	require.Equal(t, "dial failed", c.Error)
 
-	// data starts flowing -> online
-	require.True(t, c.update(1000, nil, t0.Add(5*time.Second), offlineAfter))
+	// data starts flowing -> online, but not reported: no camera_offline was sent
+	require.False(t, c.update(1000, nil, t0.Add(5*time.Second), offlineAfter))
 	require.True(t, c.Online)
 	require.Empty(t, c.Error)
 
@@ -238,6 +271,50 @@ func TestWatcherEmitsTamperingEvents(t *testing.T) {
 	require.False(t, st[0].Online)
 	require.Equal(t, errNotConfigured.Error(), st[0].Error)
 	require.Empty(t, events.list("", "", 10)) // startup state is not an event
+}
+
+// labels returns the labels of the stored events, oldest first.
+func labels(s *eventStore) []string {
+	var out []string
+	list := s.list("", "", 100)
+	for i := len(list) - 1; i >= 0; i-- {
+		out = append(out, list[i].Label)
+	}
+	return out
+}
+
+// At gateway start the byte count is still 0, so the first decision is
+// "offline" (not an event, R19). When the bytes start growing that must not
+// be reported as "back online" either: it was never reported down (review I4).
+func TestWatcherNoOnlineEventAfterStartupWithZeroBytes(t *testing.T) {
+	events := newEventStore("", 10)
+	w := newWatcher([]string{"cam1"}, time.Second, time.Hour, events)
+	bytes := 0
+	w.measure = func(string) (int, error) { return bytes, nil }
+
+	w.check() // zero bytes: offline, the first decision
+	require.False(t, w.statuses()[0].Online)
+	bytes = 1000
+	w.check() // growing: online
+	require.True(t, w.statuses()[0].Online)
+	require.Empty(t, labels(events))
+}
+
+// A real drop at runtime and the restore are both reported.
+func TestWatcherReportsRuntimeDropAndRestore(t *testing.T) {
+	events := newEventStore("", 10)
+	w := newWatcher([]string{"cam1"}, time.Second, 50*time.Millisecond, events)
+	bytes := 1000
+	w.measure = func(string) (int, error) { return bytes, nil }
+
+	w.check() // online from the start: not an event
+	time.Sleep(60 * time.Millisecond)
+	w.check() // stalled for offlineAfter: offline
+	require.False(t, w.statuses()[0].Online)
+	bytes = 2000
+	w.check() // growing again: online
+	require.True(t, w.statuses()[0].Online)
+	require.Equal(t, []string{"camera_offline", "camera_online"}, labels(events))
 }
 
 func TestStatusIncludesPlaceAndUseCases(t *testing.T) {
@@ -421,6 +498,34 @@ func getSnapshot(p *snapshots, query string) *httptest.ResponseRecorder {
 	return w
 }
 
+// snapshotURL is the snapshot URL the server sets for e.
+func snapshotURL(e Event) string {
+	return "api/cctv/snapshot?id=" + strconv.FormatInt(e.ID, 10) + "&t=" + strconv.FormatInt(e.Time.UnixNano(), 10)
+}
+
+// Event ids restart at 1 when data/ is wiped, and snapshots are cached for a
+// day, so the URL must differ between store lifetimes (review I2).
+func TestSnapshotURLIsUniquePerStoreLifetime(t *testing.T) {
+	grab := func(string) ([]byte, error) { return []byte{0xFF, 0xD8, 0xFF, 0xD9}, nil }
+	urls := map[string]bool{}
+	for i := 0; i < 2; i++ { // two fresh stores: both give their first event id 1
+		s := newEventStore("", 10)
+		p := newSnapshots(t.TempDir(), grab, s)
+		s.onAdd = p.handle
+		at := time.Date(2026, 10, 19, 10, 0, i, 0, time.UTC)
+		_, err := s.add(Event{Camera: "cam1", UseCase: "intrusion", Label: "person", Confidence: 1, Time: at})
+		require.NoError(t, err)
+		require.Eventually(t, func() bool {
+			e, ok := s.get(1)
+			return ok && e.Snapshot != ""
+		}, 2*time.Second, 10*time.Millisecond)
+		e, _ := s.get(1)
+		require.Equal(t, "api/cctv/snapshot?id=1&t="+strconv.FormatInt(at.UnixNano(), 10), e.Snapshot)
+		urls[e.Snapshot] = true
+	}
+	require.Len(t, urls, 2)
+}
+
 func TestSnapshotFromPostedImage(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "snapshots")
 	s := newEventStore("", 10)
@@ -439,10 +544,10 @@ func TestSnapshotFromPostedImage(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		e, ok := s.get(1)
-		return ok && e.Snapshot == "api/cctv/snapshot?id=1"
+		return ok && e.Snapshot == snapshotURL(e)
 	}, 2*time.Second, 10*time.Millisecond)
 
-	w = getSnapshot(p, "id=1")
+	w = getSnapshot(p, "id=1&t=123") // t only makes the URL unique; the handler ignores it
 	require.Equal(t, http.StatusOK, w.Code)
 	require.Equal(t, "image/jpeg", w.Header().Get("Content-Type"))
 	require.Equal(t, "max-age=86400", w.Header().Get("Cache-Control"))
@@ -468,7 +573,7 @@ func TestSnapshotGrabbedWhenNoImage(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		e, ok := s.get(1)
-		return ok && e.Snapshot == "api/cctv/snapshot?id=1"
+		return ok && e.Snapshot == snapshotURL(e)
 	}, 2*time.Second, 10*time.Millisecond)
 
 	mu.Lock()

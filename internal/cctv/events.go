@@ -108,6 +108,9 @@ func (s *eventStore) load() {
 		s.push(e)
 		s.nextID = e.ID + 1
 	}
+	if err := scanner.Err(); err != nil {
+		log.Error().Err(err).Str("path", s.path).Msg("[cctv] events file only partly loaded")
+	}
 
 	// a siren can't still be ringing after a restart
 	for i := range s.events {
@@ -288,6 +291,9 @@ func appendJSONLine(path string, v any) error {
 	return err
 }
 
+// maxDataBytes caps a POSTed event's data, as JSON.
+const maxDataBytes = 64 << 10
+
 // apiEvents handles:
 //
 //	GET  /api/cctv/events?camera=cam1&use_case=intrusion&limit=50
@@ -322,6 +328,18 @@ func (s *eventStore) apiEvents(w http.ResponseWriter, r *http.Request) {
 			}
 			image = b
 		}
+		// data is kept well under load()'s 1 MB line limit; a longer line
+		// would stop loading every event after it
+		if len(body.Data) > 0 {
+			if b, err := json.Marshal(body.Data); err != nil || len(b) > maxDataBytes {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "data must be at most 64 KiB of JSON"})
+				return
+			}
+		}
+		// fields the server owns: a client can't ring, acknowledge or point to a snapshot
+		body.Siren = ""
+		body.AcknowledgedAt = nil
+		body.Snapshot = ""
 		e, err := s.addWithImage(body.Event, image)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})

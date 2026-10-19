@@ -60,7 +60,10 @@ func (p *snapshots) save(e Event, image []byte) {
 		log.Warn().Err(err).Msg("[cctv] can't write snapshot")
 		return
 	}
-	p.store.update(e.ID, func(e *Event) { e.Snapshot = "api/cctv/snapshot?id=" + id })
+	// ids restart at 1 when data/ is wiped and snapshots are cached for a day,
+	// so t (ignored by apiSnapshot) makes the URL unique per store lifetime
+	src := "api/cctv/snapshot?id=" + id + "&t=" + strconv.FormatInt(e.Time.UnixNano(), 10)
+	p.store.update(e.ID, func(e *Event) { e.Snapshot = src })
 	p.prune(p.store.oldestID())
 }
 
@@ -95,7 +98,7 @@ func (p *snapshots) prune(oldest int64) {
 
 var snapshotID = regexp.MustCompile(`^[0-9]+$`)
 
-// apiSnapshot handles GET /api/cctv/snapshot?id=1
+// apiSnapshot handles GET /api/cctv/snapshot?id=1 (any other parameter, like t, is ignored)
 func (p *snapshots) apiSnapshot(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	if !snapshotID.MatchString(id) {
@@ -113,7 +116,7 @@ func (p *snapshots) apiSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 	h := w.Header()
 	h.Set("Content-Type", "image/jpeg")
-	h.Set("Cache-Control", "max-age=86400") // a snapshot never changes
+	h.Set("Cache-Control", "max-age=86400") // a snapshot URL never changes its image (see t in save)
 	h.Set("Content-Length", strconv.Itoa(len(b)))
 	_, _ = w.Write(b)
 }

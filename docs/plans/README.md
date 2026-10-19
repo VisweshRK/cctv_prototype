@@ -93,10 +93,13 @@ send them when you have them.
 `data.box` is in fractions, but `TrackedObject.box` above is in **pixels**: divide x by the frame
 width and y by the frame height before you send it.
 
-`POST /api/cctv/events` also takes an optional top-level `image`: a base64 JPEG of at most about
-3 MB (the server's body limit is 4 MB). It becomes the event's snapshot (served at
-`api/cctv/snapshot?id=<event id>`) and is never stored in the event itself. Without it the server
-grabs a frame from the camera. In Python, pass the frame: `Go2rtc.send_event(event, image=frame)`.
+`POST /api/cctv/events` also takes an optional top-level `image`: a JPEG up to about 2.9 MB
+(base64 inflates it ~4/3 within the 4 MB body limit). It becomes the event's snapshot (served at
+`api/cctv/snapshot?id=<event id>&t=<event time>`) and is never stored in the event itself. Without
+it the server grabs a frame from the camera. In Python, pass the frame: `Go2rtc.send_event(event, image=frame)`.
+
+`data` may be at most **64 KiB** of JSON; a bigger one is rejected with `400`. The server owns
+`id`, `siren`, `acknowledged_at` and `snapshot`: values sent for them are ignored.
 
 ```json
 {"camera": "cam1", "use_case": "intrusion", "label": "person", "confidence": 0.91,
