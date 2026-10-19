@@ -24,6 +24,22 @@ type Event struct {
 	Time       time.Time      `json:"time"`
 	Snapshot   string         `json:"snapshot,omitempty"` // optional path or URL of an image
 	Data       map[string]any `json:"data,omitempty"`     // optional use-case specific details
+
+	AcknowledgedAt *time.Time `json:"acknowledged_at,omitempty"` // set once a guard acknowledges the alert
+	Siren          string     `json:"siren,omitempty"`           // sirenRinging, sirenStopped or sirenUnavailable
+}
+
+const (
+	sirenRinging     = "ringing"
+	sirenStopped     = "stopped"
+	sirenUnavailable = "unavailable"
+)
+
+// message is what subscribers receive: Type is "alert" for a new event and
+// "update" for a changed one; Event is always the whole event.
+type message struct {
+	Type  string
+	Event Event
 }
 
 func (e *Event) validate() error {
@@ -42,16 +58,24 @@ func (e *Event) validate() error {
 
 // eventStore keeps the latest events in memory and appends every event to a
 // JSON Lines file, so events survive a restart. A real database comes later.
+//
+// An update is written as a new line holding the whole event; on load a line
+// with an id that is already loaded replaces that event.
 type eventStore struct {
 	mu     sync.Mutex
 	events []Event
 	max    int
 	nextID int64
 	path   string
+	subs   map[chan message]struct{}
+
+	// hooks, set once in Init before serving; they run outside the lock
+	onAdd func(e Event, image []byte)
+	onAck func(e Event)
 }
 
 func newEventStore(path string, max int) *eventStore {
-	s := &eventStore{max: max, nextID: 1, path: path}
+	s := &eventStore{max: max, nextID: 1, path: path, subs: map[chan message]struct{}{}}
 	s.load()
 	return s
 }
@@ -73,11 +97,33 @@ func (s *eventStore) load() {
 		if json.Unmarshal(scanner.Bytes(), &e) != nil {
 			continue
 		}
+		if i := s.index(e.ID); i >= 0 {
+			s.events[i] = e // a later line is an update of that event
+			continue
+		}
+		if e.ID < s.nextID {
+			continue // update of an event already trimmed by max
+		}
 		s.push(e)
-		if e.ID >= s.nextID {
-			s.nextID = e.ID + 1
+		s.nextID = e.ID + 1
+	}
+
+	// a siren can't still be ringing after a restart
+	for i := range s.events {
+		if s.events[i].Siren == sirenRinging {
+			s.events[i].Siren = sirenStopped
 		}
 	}
+}
+
+// index returns the position of the event with this id in s.events, or -1.
+func (s *eventStore) index(id int64) int {
+	for i := len(s.events) - 1; i >= 0; i-- {
+		if s.events[i].ID == id {
+			return i
+		}
+	}
+	return -1
 }
 
 func (s *eventStore) push(e Event) {
@@ -88,6 +134,12 @@ func (s *eventStore) push(e Event) {
 }
 
 func (s *eventStore) add(e Event) (Event, error) {
+	return s.addWithImage(e, nil)
+}
+
+// addWithImage stores the event, tells subscribers about it and then hands
+// the event and its (optional) JPEG image to the onAdd hook.
+func (s *eventStore) addWithImage(e Event, image []byte) (Event, error) {
 	if err := e.validate(); err != nil {
 		return e, err
 	}
@@ -96,18 +148,107 @@ func (s *eventStore) add(e Event) (Event, error) {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	e.ID = s.nextID
 	s.nextID++
 	s.push(e)
+	s.persist(e)
+	s.mu.Unlock()
 
-	if s.path != "" {
-		if err := appendJSONLine(s.path, e); err != nil {
-			log.Warn().Err(err).Msg("[cctv] can't write events file")
-		}
+	s.publish(message{Type: "alert", Event: e})
+	if s.onAdd != nil {
+		s.onAdd(e, image)
 	}
 	return e, nil
+}
+
+// update applies change to a kept event, writes the whole updated event as a
+// new line and tells subscribers. It returns false for an unknown id
+// (including one already trimmed by max).
+func (s *eventStore) update(id int64, change func(e *Event)) (Event, bool) {
+	s.mu.Lock()
+	i := s.index(id)
+	if i < 0 {
+		s.mu.Unlock()
+		return Event{}, false
+	}
+	change(&s.events[i])
+	e := s.events[i]
+	s.persist(e)
+	s.mu.Unlock()
+
+	s.publish(message{Type: "update", Event: e})
+	return e, true
+}
+
+func (s *eventStore) get(id int64) (Event, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if i := s.index(id); i >= 0 {
+		return s.events[i], true
+	}
+	return Event{}, false
+}
+
+// oldestID returns the id of the oldest event still kept, or 0 when empty.
+func (s *eventStore) oldestID() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.events) == 0 {
+		return 0
+	}
+	return s.events[0].ID
+}
+
+// persist appends the event to the events file. Call with s.mu held.
+func (s *eventStore) persist(e Event) {
+	if s.path == "" {
+		return
+	}
+	if err := appendJSONLine(s.path, e); err != nil {
+		log.Warn().Err(err).Msg("[cctv] can't write events file")
+	}
+}
+
+// subscribe returns a channel of new and changed events and a cancel func.
+// A subscriber that falls 64 messages behind is dropped: its channel is closed.
+func (s *eventStore) subscribe() (<-chan message, func()) {
+	ch := make(chan message, 64)
+
+	s.mu.Lock()
+	s.subs[ch] = struct{}{}
+	s.mu.Unlock()
+
+	cancel := func() {
+		s.mu.Lock()
+		s.unsubscribe(ch)
+		s.mu.Unlock()
+	}
+	return ch, cancel
+}
+
+// unsubscribe removes and closes ch once; safe to call again. Call with s.mu held.
+func (s *eventStore) unsubscribe(ch chan message) {
+	if _, ok := s.subs[ch]; ok {
+		delete(s.subs, ch)
+		close(ch)
+	}
+}
+
+// publish never blocks. It takes the lock on its own, after the change is
+// done, so a channel is never closed (by cancel or a drop) while being sent to.
+func (s *eventStore) publish(m message) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for ch := range s.subs {
+		select {
+		case ch <- m:
+		default:
+			s.unsubscribe(ch)
+		}
+	}
 }
 
 // list returns the newest events first, filtered by camera and use case.

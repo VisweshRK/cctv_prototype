@@ -98,6 +98,59 @@ func TestEventStoreKeepsMax(t *testing.T) {
 	require.Equal(t, int64(5), got[0].ID)
 }
 
+func TestUpdatePublishesAndPersists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	s := newEventStore(path, 10)
+	ch, cancel := s.subscribe()
+	defer cancel()
+	e, _ := s.add(Event{Camera: "cam1", UseCase: "intrusion", Label: "person", Confidence: 0.9})
+	require.Equal(t, "alert", (<-ch).Type)
+	got, ok := s.update(e.ID, func(e *Event) { e.Snapshot = "api/cctv/snapshot?id=1" })
+	require.True(t, ok)
+	m := <-ch
+	require.Equal(t, "update", m.Type)
+	require.Equal(t, got, m.Event)
+	_, ok = s.update(999, func(*Event) {})
+	require.False(t, ok)
+	s2 := newEventStore(path, 10)
+	require.Len(t, s2.list("", "", 10), 1) // replaced, not duplicated
+	require.Equal(t, "api/cctv/snapshot?id=1", s2.list("", "", 10)[0].Snapshot)
+}
+
+func TestLoadResetsRingingAndAppliesUpdates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	s := newEventStore(path, 10)
+	e, _ := s.add(Event{Camera: "cam1", UseCase: "fire", Label: "smoke", Confidence: 0.8})
+	s.update(e.ID, func(e *Event) { e.Siren = sirenRinging })
+	got, _ := newEventStore(path, 10).get(e.ID)
+	require.Equal(t, sirenStopped, got.Siren)
+}
+
+func TestSlowSubscriberIsDropped(t *testing.T) {
+	s := newEventStore("", 1000)
+	ch, cancel := s.subscribe()
+	defer cancel()
+	start := time.Now()
+	for i := 0; i < 200; i++ {
+		_, _ = s.add(Event{Camera: "c", UseCase: "u", Label: "l"})
+	}
+	require.Less(t, time.Since(start), time.Second)
+	n := 0
+	for range ch { // must be closed, or this loop never ends
+		n++
+	}
+	require.LessOrEqual(t, n, 64)
+}
+
+func TestAddCallsOnAddHook(t *testing.T) {
+	s := newEventStore("", 10)
+	var gotImage []byte
+	s.onAdd = func(e Event, image []byte) { gotImage = image }
+	_, err := s.addWithImage(Event{Camera: "c", UseCase: "u", Label: "l"}, []byte{0xFF, 0xD8})
+	require.NoError(t, err)
+	require.Equal(t, []byte{0xFF, 0xD8}, gotImage)
+}
+
 func TestCameraUpdate(t *testing.T) {
 	const offlineAfter = 20 * time.Second
 	t0 := time.Now()
