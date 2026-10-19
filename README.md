@@ -84,21 +84,26 @@ Take a slot by working on a branch `usecase/<slot>` (see [CONTRIBUTING.md](CONTR
 
 | # | Use case | Slot | Input | Owner |
 | --- | --- | --- | --- | --- |
-| 1 | Intrusion | [ai/plugins/intrusion](ai/plugins/intrusion) | video | _open_ |
-| 2 | Tampering / disconnect | [ai/plugins/tampering](ai/plugins/tampering) (disconnect is done in [internal/cctv/status.go](internal/cctv/status.go)) | video | _open_ |
-| 3 | Face recognition | [ai/plugins/face_recognition](ai/plugins/face_recognition) | video | _open_ |
-| 4 | Restricted area | [ai/plugins/restricted_area](ai/plugins/restricted_area) | video | _open_ |
-| 5 | Fall detection | [ai/plugins/fall](ai/plugins/fall) | video | _open_ |
-| 6 | Occupancy | [ai/plugins/occupancy](ai/plugins/occupancy) | video | _open_ |
-| 7 | Electricity used when nobody is there | [ai/plugins/power_when_absent](ai/plugins/power_when_absent) | video | _open_ |
-| 8 | Fire and smoke | [ai/plugins/fire](ai/plugins/fire) | video | _open_ |
-| 9 | Vehicle + licence plate | [ai/plugins/vehicle_lpr](ai/plugins/vehicle_lpr) | video | _open_ |
-| 10 | Baby crying | [ai/plugins/baby_crying](ai/plugins/baby_crying) | audio | _open_ |
+| 1 | Intrusion | [ai/plugins/intrusion](ai/plugins/intrusion) | video | P3 Sanjay + P4 Kishore |
+| 2 | Tampering / disconnect | [ai/plugins/tampering](ai/plugins/tampering) (disconnect is done in [internal/cctv/status.go](internal/cctv/status.go)) | video | Viswesh |
+| 3 | Face recognition | [ai/plugins/face_recognition](ai/plugins/face_recognition) | video | P2 Krithick |
+| 4 | Restricted area | [ai/plugins/restricted_area](ai/plugins/restricted_area) | video | P3 Sanjay + P4 Kishore |
+| 5 | Fall detection | [ai/plugins/fall](ai/plugins/fall) | video | P3 Sanjay + P4 Kishore |
+| 6 | Occupancy | [ai/plugins/occupancy](ai/plugins/occupancy) | video | P3 Sanjay + P4 Kishore |
+| 7 | Electricity used when nobody is there | [ai/plugins/power_when_absent](ai/plugins/power_when_absent) | video | P1 Mohanraj |
+| 8 | Fire and smoke | [ai/plugins/fire](ai/plugins/fire) | video | P1 Mohanraj |
+| 9 | Vehicle + licence plate | [ai/plugins/vehicle_lpr](ai/plugins/vehicle_lpr) | video | P2 Krithick |
+| 10 | Baby crying | [ai/plugins/baby_crying](ai/plugins/baby_crying) | audio | P1 Mohanraj |
 
-Put your name in the Owner column in your first PR.
+**Shared code** (`ai/cctv_ai/`, `internal/cctv/`, `go2rtc.yaml`, camera setup, the shared object detector) is
+owned by **Viswesh**, who also helps P2 with models. Changes there go through Viswesh.
 
 [docs/frigate-teardown.md](docs/frigate-teardown.md) explains how Frigate handles each use case and where
 we can be more efficient than Frigate.
+
+**Start here to build your use case:** [docs/plans/](docs/plans/README.md) has one step-by-step plan per
+person, and [docs/how-frigate-works.md](docs/how-frigate-works.md) explains the Frigate engine (motion,
+regions, tracker, scoring) that makes its detection fast and accurate.
 
 ## Tests
 

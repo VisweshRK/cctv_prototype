@@ -15,7 +15,7 @@ Raise an event when a person appears on a camera during armed hours (e.g. night,
 
 ## Suggested approach
 1. Start from `example_motion` (already detects change) and only run the detector when motion is found.
-2. Person detector: a small YOLO model exported to ONNX, run with `onnxruntime` (add it to `requirements.txt` in your PR).
+2. Use the `person` boxes from the shared detector in `ai/cctv_ai/` (YOLOX). Don't add your own detector.
 3. Add an armed schedule (start/end time) as a class attribute first; move to config later.
 4. Send one event per new person, not one per frame (keep a short cooldown per camera).
 

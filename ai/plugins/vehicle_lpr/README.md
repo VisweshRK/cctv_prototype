@@ -13,7 +13,9 @@ Detect vehicles at the gate and read their number plates; flag unknown plates.
 - `frigate/data_processing/common/license_plate/mixin.py`: plate detection, OCR, and merging repeated reads of the same car into one result.
 
 ## Suggested approach
-1. Vehicle + plate detector (YOLO, ONNX), then OCR on the plate crop (e.g. PaddleOCR models in ONNX).
+1. Take `car`/`motorcycle`/`bus`/`truck` boxes from the shared detector, find the plate inside each box
+   (a plate detector with an MIT/Apache licence, or PaddleOCR's text detector), then OCR the plate crop
+   (PaddleOCR models in ONNX, Apache 2.0).
 2. Indian plate format check (e.g. `TN 01 AB 1234`) to fix common OCR mix-ups (0/O, 1/I, 8/B).
 3. Send one event per vehicle visit, with the best plate read.
 

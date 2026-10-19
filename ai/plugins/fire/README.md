@@ -12,7 +12,8 @@ Detect flames or smoke early.
 - No fire model in the free Frigate models. Reuse the motion-first pattern from `frigate/motion/improved_motion.py` so the model runs less.
 
 ## Suggested approach
-1. A YOLO fire/smoke model in ONNX (several open datasets exist).
+1. A fire/smoke model in ONNX, e.g. YOLOX trained on an open fire/smoke dataset (check the dataset's licence).
+   Most ready-made fire models online are trained with Ultralytics and are AGPL: don't use those.
 2. Require the detection in several frames in a row: flames flicker, a red shirt does not.
 3. Low thresholds are OK here: a false fire alarm is cheaper than a missed one.
 

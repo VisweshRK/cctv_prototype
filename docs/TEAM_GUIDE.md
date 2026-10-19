@@ -93,18 +93,30 @@ If that works, your setup is done.
 
 ## 4. Working on your use case
 
-| # | Use case | Folder |
-| --- | --- | --- |
-| 1 | Intrusion | `ai/plugins/intrusion` |
-| 2 | Tampering (covered/blurred/moved) | `ai/plugins/tampering` |
-| 3 | Face recognition | `ai/plugins/face_recognition` |
-| 4 | Restricted area | `ai/plugins/restricted_area` |
-| 5 | Fall detection | `ai/plugins/fall` |
-| 6 | Occupancy | `ai/plugins/occupancy` |
-| 7 | Electricity used when nobody is there | `ai/plugins/power_when_absent` |
-| 8 | Fire and smoke | `ai/plugins/fire` |
-| 9 | Vehicle + licence plate | `ai/plugins/vehicle_lpr` |
-| 10 | Baby crying | `ai/plugins/baby_crying` |
+| # | Use case | Folder | Owner | Depends on |
+| --- | --- | --- | --- | --- |
+| 1 | Intrusion | `ai/plugins/intrusion` | P3 Sanjay + P4 Kishore | shared detector (person) |
+| 2 | Tampering (covered/blurred/moved) | `ai/plugins/tampering` | Viswesh | nothing |
+| 3 | Face recognition | `ai/plugins/face_recognition` | P2 Krithick | nothing (own face model) |
+| 4 | Restricted area | `ai/plugins/restricted_area` | P3 Sanjay + P4 Kishore | shared detector (person) |
+| 5 | Fall detection | `ai/plugins/fall` | P3 Sanjay + P4 Kishore | shared detector (person) |
+| 6 | Occupancy | `ai/plugins/occupancy` | P3 Sanjay + P4 Kishore | shared detector (person) |
+| 7 | Electricity used when nobody is there | `ai/plugins/power_when_absent` | P1 Mohanraj | occupancy (start with "lights on?" from frame brightness) |
+| 8 | Fire and smoke | `ai/plugins/fire` | P1 Mohanraj | nothing (own model) |
+| 9 | Vehicle + licence plate | `ai/plugins/vehicle_lpr` | P2 Krithick | shared detector (car), then own plate model + OCR |
+| 10 | Baby crying | `ai/plugins/baby_crying` | P1 Mohanraj | camera audio |
+
+Viswesh owns the shared code (worker, detector, go2rtc config, cameras) and helps P2 with models.
+
+**Shared detector: don't build your own person/car detector.** One detector runs once per frame for
+everyone (so the laptop runs one model, not five) and gives each plugin a list of boxes:
+
+```python
+[{"label": "person", "box": [x1, y1, x2, y2], "score": 0.9}, ...]   # pixels, top-left / bottom-right
+```
+
+Until it lands in `ai/cctv_ai/`, write your logic (zones, counting, fall rules, plate reading) against that
+list, and test it with hand-made boxes.
 
 1. Read your folder's `README.md` (goal, events to send, which Frigate code to read, suggested approach)
    and the working example `ai/plugins/example_motion/__init__.py`.
@@ -125,8 +137,7 @@ If that works, your setup is done.
    git commit -m "intrusion: run person detector on motion frames"
    git push -u origin usecase/intrusion
    ```
-5. When it works, open a **Pull Request** on GitHub from your branch into `main`. Add your name to the Owner
-   column in `README.md` in the same PR. CI must be green and one teammate reviews before merging.
+5. When it works, open a **Pull Request** on GitHub from your branch into `main`. CI must be green and one teammate reviews before merging.
 6. Keep your branch up to date when `main` changes:
    ```bash
    git switch main
@@ -158,6 +169,10 @@ If that works, your setup is done.
     ```
 11. **Credit Frigate when you copy its code.** Frigate is MIT: copying ideas is fine; if you copy actual
     code, put its copyright line (`Copyright (c) 2026 Frigate, Inc.`, MIT) in a comment above it.
+12. **Check a model's licence before you use it.** Our project is MIT, so models and libraries must be
+    MIT, Apache 2.0 or BSD (for example YOLOX, RT-DETR, OpenCV's YuNet/SFace, PaddleOCR).
+    **Don't use Ultralytics YOLOv5/v8/v11 (AGPL) or YOLOv9 (GPL)**: they would force the whole project
+    under their licence. Write the model's name, link and licence in your folder README.
 
 ## 6. When is a use case done?
 
@@ -172,5 +187,6 @@ If that works, your setup is done.
 
 - Something broken in setup, the worker or go2rtc: ask in the group with the error text (a screenshot
   of the terminal is fine; hide camera addresses).
+- Your step-by-step plan: [plans/](plans/README.md). How Frigate's engine works: [how-frigate-works.md](how-frigate-works.md).
 - Background on how Frigate does each use case: [frigate-teardown.md](frigate-teardown.md).
 - More detail: [README.md](../README.md), [ai/README.md](../ai/README.md), [CONTRIBUTING.md](../CONTRIBUTING.md).
