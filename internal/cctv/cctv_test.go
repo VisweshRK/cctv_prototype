@@ -3,6 +3,7 @@ package cctv
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -385,4 +387,153 @@ func TestAckEndpoint(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, ack("POST", `{"ids":[]}`).Code)
 	require.Equal(t, http.StatusBadRequest, ack("POST", `not json`).Code)
 	require.Equal(t, http.StatusMethodNotAllowed, ack("GET", "").Code)
+}
+
+// postEvent POSTs body to s.apiEvents and returns the recorder.
+func postEvent(s *eventStore, body string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest("POST", "/api/cctv/events", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	s.apiEvents(w, r)
+	return w
+}
+
+func getSnapshot(p *snapshots, query string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest("GET", "/api/cctv/snapshot?"+query, nil)
+	w := httptest.NewRecorder()
+	p.apiSnapshot(w, r)
+	return w
+}
+
+func TestSnapshotFromPostedImage(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "snapshots")
+	s := newEventStore("", 10)
+	p := newSnapshots(dir, func(camera string) ([]byte, error) {
+		t.Error("grab must not be called when an image is posted")
+		return nil, errors.New("unexpected grab")
+	}, s)
+	s.onAdd = p.handle
+
+	jpeg := []byte{0xFF, 0xD8, 0xFF, 0xD9}
+	body := `{"camera":"cam1","use_case":"intrusion","label":"person","confidence":0.9,"image":"` +
+		base64.StdEncoding.EncodeToString(jpeg) + `"}`
+	w := postEvent(s, body)
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	require.NotContains(t, w.Body.String(), "image")
+
+	require.Eventually(t, func() bool {
+		e, ok := s.get(1)
+		return ok && e.Snapshot == "api/cctv/snapshot?id=1"
+	}, 2*time.Second, 10*time.Millisecond)
+
+	w = getSnapshot(p, "id=1")
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, "image/jpeg", w.Header().Get("Content-Type"))
+	require.Equal(t, "max-age=86400", w.Header().Get("Cache-Control"))
+	require.Equal(t, jpeg, w.Body.Bytes())
+}
+
+func TestSnapshotGrabbedWhenNoImage(t *testing.T) {
+	dir := t.TempDir()
+	s := newEventStore("", 10)
+	frame := []byte{0xFF, 0xD8, 0x01, 0xFF, 0xD9}
+	var mu sync.Mutex
+	var grabbed []string
+	p := newSnapshots(dir, func(camera string) ([]byte, error) {
+		mu.Lock()
+		grabbed = append(grabbed, camera)
+		mu.Unlock()
+		return frame, nil
+	}, s)
+	s.onAdd = p.handle
+
+	w := postEvent(s, `{"camera":"cam2","use_case":"intrusion","label":"person","confidence":0.9}`)
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+
+	require.Eventually(t, func() bool {
+		e, ok := s.get(1)
+		return ok && e.Snapshot == "api/cctv/snapshot?id=1"
+	}, 2*time.Second, 10*time.Millisecond)
+
+	mu.Lock()
+	require.Equal(t, []string{"cam2"}, grabbed)
+	mu.Unlock()
+	b, err := os.ReadFile(filepath.Join(dir, "1.jpg"))
+	require.NoError(t, err)
+	require.Equal(t, frame, b)
+}
+
+func TestSnapshotGrabFailureLeavesEventWithoutSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	s := newEventStore("", 10)
+	var calls atomic.Int32
+	p := newSnapshots(dir, func(camera string) ([]byte, error) {
+		calls.Add(1)
+		return nil, errors.New("no frame")
+	}, s)
+	s.onAdd = p.handle
+
+	w := postEvent(s, `{"camera":"cam1","use_case":"intrusion","label":"person","confidence":0.9}`)
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+
+	time.Sleep(200 * time.Millisecond)
+	e, ok := s.get(1)
+	require.True(t, ok)
+	require.Empty(t, e.Snapshot)
+	require.Equal(t, int32(1), calls.Load())
+	_, err := os.Stat(filepath.Join(dir, "1.jpg"))
+	require.True(t, os.IsNotExist(err), err)
+}
+
+func TestSnapshotSkippedForCameraStatusEvents(t *testing.T) {
+	s := newEventStore("", 10)
+	var calls atomic.Int32
+	p := newSnapshots(t.TempDir(), func(camera string) ([]byte, error) {
+		calls.Add(1)
+		return []byte{0xFF, 0xD8, 0xFF, 0xD9}, nil
+	}, s)
+	s.onAdd = p.handle
+
+	_, err := s.add(Event{Camera: "cam1", UseCase: "tampering", Label: "camera_offline", Confidence: 1})
+	require.NoError(t, err)
+
+	time.Sleep(200 * time.Millisecond)
+	require.Equal(t, int32(0), calls.Load())
+	e, _ := s.get(1)
+	require.Empty(t, e.Snapshot)
+}
+
+func TestSnapshotEndpointRejectsBadIDs(t *testing.T) {
+	p := newSnapshots(t.TempDir(), nil, newEventStore("", 10))
+	for _, q := range []string{"id=../events", "id=", "id=1a"} {
+		require.Equal(t, http.StatusBadRequest, getSnapshot(p, q).Code, q)
+	}
+	require.Equal(t, http.StatusNotFound, getSnapshot(p, "id=42").Code)
+}
+
+func TestPostImageRejectsBadData(t *testing.T) {
+	s := newEventStore("", 10)
+	for _, image := range []string{"%%%", base64.StdEncoding.EncodeToString([]byte("hello"))} {
+		body := `{"camera":"cam1","use_case":"intrusion","label":"person","confidence":0.9,"image":"` + image + `"}`
+		w := postEvent(s, body)
+		require.Equal(t, http.StatusBadRequest, w.Code, image)
+		require.Contains(t, w.Body.String(), "image must be a base64 JPEG", image)
+	}
+	require.Empty(t, s.list("", "", 10))
+}
+
+func TestPruneDeletesOldSnapshots(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"1.jpg", "2.jpg", "3.jpg", "notes.txt"} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("x"), 0644))
+	}
+	p := newSnapshots(dir, nil, newEventStore("", 10))
+	p.prune(3)
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	var left []string
+	for _, e := range entries {
+		left = append(left, e.Name())
+	}
+	require.Equal(t, []string{"3.jpg", "notes.txt"}, left)
 }

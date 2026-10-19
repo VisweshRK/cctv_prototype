@@ -2,6 +2,7 @@ package cctv
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -290,7 +291,7 @@ func appendJSONLine(path string, v any) error {
 // apiEvents handles:
 //
 //	GET  /api/cctv/events?camera=cam1&use_case=intrusion&limit=50
-//	POST /api/cctv/events  {"camera":"cam1","use_case":"intrusion","label":"person","confidence":0.9}
+//	POST /api/cctv/events  {"camera":"cam1","use_case":"intrusion","label":"person","confidence":0.9,"image":"<optional base64 JPEG>"}
 func (s *eventStore) apiEvents(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
@@ -302,12 +303,26 @@ func (s *eventStore) apiEvents(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.list(query.Get("camera"), query.Get("use_case"), limit))
 
 	case "POST":
-		var e Event
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024*1024)).Decode(&e); err != nil {
+		// image is an optional base64 JPEG; it becomes the snapshot and is
+		// never stored in the event itself
+		var body struct {
+			Event
+			Image string `json:"image"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(&body); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
 			return
 		}
-		e, err := s.add(e)
+		var image []byte
+		if body.Image != "" {
+			b, err := base64.StdEncoding.DecodeString(body.Image)
+			if err != nil || len(b) < 2 || b[0] != 0xFF || b[1] != 0xD8 {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "image must be a base64 JPEG"})
+				return
+			}
+			image = b
+		}
+		e, err := s.addWithImage(body.Event, image)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
