@@ -24,6 +24,7 @@ const HOUR = 3600000;
 
 const dataOf = (e) => (e && e.data) || {};
 const nonEmpty = (v) => typeof v === 'string' && v !== '';
+const mod = (a, n) => ((a % n) + n) % n; // never negative, unlike %
 
 /**
  * How an event is shown. Titles are raw text: escape them when rendering.
@@ -37,21 +38,21 @@ export function describe(e) {
     let over = {};
 
     switch (e.use_case) {
-    case 'tampering':
-        if (e.label === 'camera_online') {
-            over = {severity: 'info', title: 'Camera back online', popup: false, siren: false};
-        }
-        break;
-    case 'face_recognition':
-        if (e.label === 'known_face') {
-            over = {severity: 'info', title: `Known: ${d.name || 'person'}`, popup: false, siren: false};
-        }
-        break;
-    case 'vehicle_lpr':
-        over = nonEmpty(d.plate)
-            ? {title: `${base.title} · ${d.plate}`, popup: true}
-            : {popup: false};
-        break;
+        case 'tampering':
+            if (e.label === 'camera_online') {
+                over = {severity: 'info', title: 'Camera back online', popup: false, siren: false};
+            }
+            break;
+        case 'face_recognition':
+            if (e.label === 'known_face') {
+                over = {severity: 'info', title: `Known: ${d.name || 'person'}`, popup: false, siren: false};
+            }
+            break;
+        case 'vehicle_lpr':
+            over = nonEmpty(d.plate)
+                ? {title: `${base.title} · ${d.plate}`, popup: true}
+                : {popup: false};
+            break;
     }
 
     const r = {...base, ...over};
@@ -136,20 +137,22 @@ export class Incidents {
     }
 
     /**
-     * Replaces a queued event by id, without reordering groups. An event that
-     * is now acknowledged leaves its group; an empty group is removed. An
-     * unknown id is ignored.
+     * Replaces a queued event by id, without reordering groups. An unknown id
+     * is ignored. An event that is now acknowledged leaves its group (an empty
+     * group is removed); one whose camera|use_case or popup changed leaves its
+     * group and goes through add().
      */
     update(e) {
         const found = this.#find(e.id);
         if (!found) return;
         const {g, i} = found;
-        if (isAcked(e)) {
-            g.events.splice(i, 1);
-            if (!g.events.length) this.#groups.delete(g.key);
-        } else {
+        if (!isAcked(e) && keyOf(e) === g.key && describe(e).popup) {
             g.events[i] = e;
+            return;
         }
+        g.events.splice(i, 1);
+        if (!g.events.length) this.#groups.delete(g.key);
+        this.add(e); // ignores it if acknowledged or not a popup
     }
 
     /** @returns {{key, camera, useCase, events, latest} | null} */
@@ -180,7 +183,8 @@ export class Incidents {
 export function summarize(events, now) {
     const n = new Date(now);
     const nowMs = n.getTime();
-    const hourStart = new Date(n).setMinutes(0, 0, 0);
+    // not setMinutes(0): in a DST fall-back hour that picks the earlier instant
+    const hourStart = nowMs - (n.getMinutes() * 60000 + n.getSeconds() * 1000 + n.getMilliseconds());
     const sameDay = (t) => {
         const d = new Date(t);
         return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate();
@@ -198,7 +202,7 @@ export function summarize(events, now) {
             s.perUseCase[e.use_case] = (s.perUseCase[e.use_case] || 0) + 1;
         }
         const i = 11 + Math.floor((t - hourStart) / HOUR);
-        if (i >= 0 && t <= nowMs) s.timeline[i]++;
+        if (i >= 0 && i < 12 && t <= nowMs) s.timeline[i]++;
     }
     return s;
 }
@@ -223,11 +227,12 @@ const CYCLE = [
  * A POST /api/cctv/events body like an AI worker would send, deterministic
  * per i. The server fills id and time.
  */
-export function simulated(i, cameras = []) {
-    const c = CYCLE[i % CYCLE.length];
-    const wobble = ((i * 7) % 5) / 100; // 0..0.04, so repeated alerts differ a bit
+export function simulated(i, cameras) {
+    const cams = Array.isArray(cameras) ? cameras : [];
+    const c = CYCLE[mod(i, CYCLE.length)];
+    const wobble = mod(i * 7, 5) / 100; // 0..0.04, so repeated alerts differ a bit
     return {
-        camera: cameras.length ? cameras[i % cameras.length] : 'cam1',
+        camera: cams.length ? cams[mod(i, cams.length)] : 'cam1',
         use_case: c.use_case,
         label: c.label,
         confidence: Math.round((c.confidence + wobble - 0.02) * 100) / 100,

@@ -1,6 +1,7 @@
-// Tests for www/cctv-logic.js. Run with: node --test www/tests/
+// Tests for www/cctv-logic.js. Run with: node --test "www/tests/*.test.mjs"
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {spawnSync} from 'node:child_process';
 
 import {
     USE_CASES, describe, areaOf, detailOf, boxOf, esc, snapshotState,
@@ -206,6 +207,27 @@ test('Incidents: update replaces in place and never adds or reorders', () => {
     assert.deepEqual(q.ids('cam3|intrusion'), []);
 });
 
+test('Incidents: update that changes group or popup re-files the event', () => {
+    const q = new Incidents();
+    q.add(ev({id: 1}));
+    q.add(ev({id: 2}));
+    q.add(ev({id: 3, camera: 'cam2', use_case: 'fire', label: 'smoke'}));
+
+    // id 1 now reports cam3: it leaves cam1|intrusion and is added as cam3|intrusion
+    q.update(ev({id: 1, camera: 'cam3'}));
+    assert.deepEqual(q.ids('cam1|intrusion'), [2]);
+    assert.equal(q.current().key, 'cam3|intrusion');
+    assert.deepEqual(q.ids('cam3|intrusion'), [1]);
+    assert.equal(q.others(), 2);
+
+    // same group, but no longer a popup: it leaves the queue
+    q.add(ev({id: 4, use_case: 'vehicle_lpr', label: 'plate', data: {plate: 'TN09AB1234'}}));
+    assert.deepEqual(q.ids('cam1|vehicle_lpr'), [4]);
+    q.update(ev({id: 4, use_case: 'vehicle_lpr', label: 'plate', data: {}}));
+    assert.deepEqual(q.ids('cam1|vehicle_lpr'), []);
+    assert.equal(q.current().key, 'cam3|intrusion');
+});
+
 test('Incidents: re-adding an id replaces that event in place', () => {
     const q = new Incidents();
     q.add(ev({id: 1}));
@@ -270,6 +292,33 @@ test('summarize: timeline covers the current clock hour from its start', () => {
     assert.equal(s.alertsToday, 5);
 });
 
+test('summarize: DST fall-back hour (America/New_York)', (t) => {
+    // TZ must be set before the process starts, so run the check in a child.
+    // 2026-11-01 01:30 EST: 01:00-02:00 happens twice, now is in the second one.
+    const code = `
+        const {summarize} = await import(${JSON.stringify(new URL('../cctv-logic.js', import.meta.url).href)});
+        const now = Date.parse('2026-11-01T06:30:00Z');
+        const ev = (time) => ({id: 1, camera: 'cam1', use_case: 'intrusion', label: 'person', confidence: 0.9, time});
+        const s = summarize([
+            ev('2026-11-01T06:10:00Z'), // 01:10 EST, current hour
+            ev('2026-11-01T05:40:00Z'), // 01:40 EDT, previous hour
+            ev('2026-11-01T04:59:00Z'), // 00:59 EDT
+        ], now);
+        console.log(JSON.stringify({offset: new Date(now).getTimezoneOffset(), timeline: s.timeline}));
+    `;
+    const r = spawnSync(process.execPath, ['--no-warnings', '--input-type=module', '-e', code],
+        {env: {...process.env, TZ: 'America/New_York'}, encoding: 'utf8'});
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout);
+    if (out.offset !== 300) {
+        t.skip(`TZ not applied in child (offset ${out.offset})`);
+        return;
+    }
+    assert.equal(out.timeline.length, 12);
+    assert.ok(out.timeline.every(Number.isFinite), JSON.stringify(out.timeline));
+    assert.deepEqual(out.timeline, [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1]);
+});
+
 test('simulated', () => {
     const cams = ['cam1', 'cam2'];
     const a = simulated(0, cams);
@@ -307,6 +356,14 @@ test('simulated', () => {
 
     assert.equal(simulated(3, []).camera, 'cam1');
     assert.equal(simulated(3).camera, 'cam1');
+    assert.equal(simulated(3, 'cam9').camera, 'cam1');
+    assert.equal(simulated(3, null).camera, 'cam1');
+
+    // a negative i still cycles: -1 is the last use case and the last camera
+    const neg = simulated(-1, ['cam1', 'cam2', 'cam3']);
+    assert.equal(neg.use_case, 'vehicle_lpr');
+    assert.equal(neg.camera, 'cam3');
+    assert.equal(simulated(-6, cams).use_case, 'intrusion');
 
     // each call returns fresh objects
     simulated(0, cams).data.box[0] = 0.99;
