@@ -1,6 +1,8 @@
 package cctv
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -234,4 +236,90 @@ func TestWatcherEmitsTamperingEvents(t *testing.T) {
 	require.False(t, st[0].Online)
 	require.Equal(t, errNotConfigured.Error(), st[0].Error)
 	require.Empty(t, events.list("", "", 10)) // startup state is not an event
+}
+
+func TestStreamSendsAlertsAndPings(t *testing.T) {
+	defer func(d time.Duration) { pingEvery = d }(pingEvery)
+	pingEvery = 50 * time.Millisecond
+
+	s := newEventStore("", 10)
+	srv := httptest.NewServer(http.HandlerFunc(s.apiStream))
+	defer srv.Close()
+
+	res, err := http.Post(srv.URL, "text/plain", nil)
+	require.NoError(t, err)
+	res.Body.Close()
+	require.Equal(t, http.StatusMethodNotAllowed, res.StatusCode)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", srv.URL, nil)
+	require.NoError(t, err)
+	res, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer res.Body.Close()
+	require.Equal(t, "text/event-stream", res.Header.Get("Content-Type"))
+	require.Equal(t, "no-cache", res.Header.Get("Cache-Control"))
+
+	lines := make(chan string, 100)
+	go func() {
+		r := bufio.NewReader(res.Body)
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				close(lines)
+				return
+			}
+			lines <- strings.TrimRight(line, "\n")
+		}
+	}()
+	// next returns the next line that isn't blank or a ping
+	next := func() string {
+		for {
+			select {
+			case line, ok := <-lines:
+				require.True(t, ok, "stream ended")
+				if line != "" && line != ": ping" {
+					return line
+				}
+			case <-time.After(time.Second):
+				require.FailNow(t, "no line within 1s")
+			}
+		}
+	}
+
+	require.Equal(t, ": hello", next())
+
+	_, err = s.add(Event{Camera: "cam1", UseCase: "intrusion", Label: "person", Confidence: 0.9})
+	require.NoError(t, err)
+	require.Equal(t, "event: alert", next())
+	data := next()
+	require.True(t, strings.HasPrefix(data, `data: {"id":1,`), data)
+	var e Event
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimPrefix(data, "data: ")), &e))
+	require.Equal(t, "intrusion", e.UseCase)
+
+	s.update(1, func(e *Event) { e.Siren = sirenUnavailable })
+	require.Equal(t, "event: update", next())
+	data = next()
+	require.True(t, strings.HasPrefix(data, "data: "), data)
+	require.Contains(t, data, `"siren":"unavailable"`)
+
+	deadline := time.After(500 * time.Millisecond)
+	for gotPing := false; !gotPing; {
+		select {
+		case line, ok := <-lines:
+			require.True(t, ok, "stream ended")
+			gotPing = line == ": ping"
+		case <-deadline:
+			require.FailNow(t, "no ping within 500ms")
+		}
+	}
+
+	cancel()
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return len(s.subs) == 0
+	}, time.Second, 10*time.Millisecond)
 }
