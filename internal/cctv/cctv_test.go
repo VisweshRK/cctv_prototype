@@ -537,3 +537,229 @@ func TestPruneDeletesOldSnapshots(t *testing.T) {
 	}
 	require.Equal(t, []string{"3.jpg", "notes.txt"}, left)
 }
+
+// fakePlayer records every (camera, source) call; fail makes it error, and
+// gate (if set) runs inside the call, so a test can hold a play in flight.
+type fakePlayer struct {
+	mu    sync.Mutex
+	calls [][2]string
+	fail  bool
+	gate  func(camera, source string)
+}
+
+func (p *fakePlayer) play(camera, source string) error {
+	p.mu.Lock()
+	p.calls = append(p.calls, [2]string{camera, source})
+	fail, gate := p.fail, p.gate
+	p.mu.Unlock()
+	if gate != nil {
+		gate(camera, source)
+	}
+	if fail {
+		return errors.New("no speaker")
+	}
+	return nil
+}
+
+func (p *fakePlayer) got() [][2]string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([][2]string(nil), p.calls...)
+}
+
+const testSirenSrc = "ffmpeg:siren.wav#audio=pcmu#input=file"
+
+// newTestSiren wires a siren to a fresh store the way Init will: through onAdd.
+func newTestSiren(p *fakePlayer) (*eventStore, *siren) {
+	s := newEventStore("", 100)
+	sir := newSiren(p.play, testSirenSrc, []string{"intrusion", "restricted_area", "fire"}, 100*time.Millisecond, s)
+	s.onAdd = func(e Event, _ []byte) { sir.onEvent(e) }
+	return s, sir
+}
+
+func addAlert(t *testing.T, s *eventStore, camera, useCase string) Event {
+	t.Helper()
+	e, err := s.add(Event{Camera: camera, UseCase: useCase, Label: "person", Confidence: 0.9})
+	require.NoError(t, err)
+	return e
+}
+
+func sirenOf(t *testing.T, s *eventStore, id int64) string {
+	t.Helper()
+	e, ok := s.get(id)
+	require.True(t, ok)
+	return e.Siren
+}
+
+func ackAlert(t *testing.T, s *eventStore, sir *siren, id int64) {
+	t.Helper()
+	e, ok := s.get(id)
+	require.True(t, ok)
+	sir.onAck(e)
+}
+
+func TestSirenRingsUntilAck(t *testing.T) {
+	p := &fakePlayer{}
+	s, sir := newTestSiren(p)
+
+	e1 := addAlert(t, s, "cam1", "intrusion")
+	require.Equal(t, [][2]string{{"cam1", testSirenSrc}}, p.got())
+	require.Equal(t, sirenRinging, sirenOf(t, s, e1.ID))
+
+	e2 := addAlert(t, s, "cam1", "intrusion")
+	require.Len(t, p.got(), 1) // already ringing: no new call
+	require.Equal(t, sirenRinging, sirenOf(t, s, e2.ID))
+
+	ackAlert(t, s, sir, e1.ID)
+	require.Len(t, p.got(), 1) // e2 still unacknowledged: keeps ringing
+
+	ackAlert(t, s, sir, e2.ID)
+	require.Equal(t, [][2]string{{"cam1", testSirenSrc}, {"cam1", ""}}, p.got())
+	require.Equal(t, sirenStopped, sirenOf(t, s, e1.ID))
+	require.Equal(t, sirenStopped, sirenOf(t, s, e2.ID))
+}
+
+func TestSirenOnlyForSirenUseCases(t *testing.T) {
+	p := &fakePlayer{}
+	s, sir := newTestSiren(p)
+
+	e := addAlert(t, s, "cam1", "fall")
+	require.Empty(t, p.got())
+	require.Empty(t, sirenOf(t, s, e.ID))
+
+	// an ack of a non-siren event must not disturb a ringing camera
+	e2 := addAlert(t, s, "cam1", "intrusion")
+	ackAlert(t, s, sir, e.ID)
+	require.Len(t, p.got(), 1)
+	require.Equal(t, sirenRinging, sirenOf(t, s, e2.ID))
+}
+
+func TestSirenOnlyOnCameraThatSawIt(t *testing.T) {
+	p := &fakePlayer{}
+	s, _ := newTestSiren(p)
+
+	addAlert(t, s, "cam2", "fire")
+	require.Equal(t, [][2]string{{"cam2", testSirenSrc}}, p.got())
+}
+
+func TestSirenCutOffAndStaysQuiet(t *testing.T) {
+	p := &fakePlayer{}
+	s, sir := newTestSiren(p)
+
+	e1 := addAlert(t, s, "cam1", "intrusion")
+	time.Sleep(200 * time.Millisecond) // past max
+	calls := p.got()
+	require.Equal(t, [2]string{"cam1", ""}, calls[len(calls)-1])
+	require.Equal(t, sirenStopped, sirenOf(t, s, e1.ID))
+
+	e2 := addAlert(t, s, "cam1", "intrusion") // e1 still unacknowledged: stay quiet
+	require.Len(t, p.got(), len(calls))
+	require.Equal(t, sirenStopped, sirenOf(t, s, e2.ID))
+
+	ackAlert(t, s, sir, e1.ID)
+	ackAlert(t, s, sir, e2.ID)
+	require.Len(t, p.got(), len(calls)) // nothing was playing: no stop call
+
+	addAlert(t, s, "cam1", "intrusion")
+	calls = p.got()
+	require.Equal(t, [2]string{"cam1", testSirenSrc}, calls[len(calls)-1])
+}
+
+func TestSirenUnavailable(t *testing.T) {
+	p := &fakePlayer{fail: true}
+	s, _ := newTestSiren(p)
+
+	e1 := addAlert(t, s, "cam1", "intrusion")
+	require.Equal(t, sirenUnavailable, sirenOf(t, s, e1.ID))
+	e2 := addAlert(t, s, "cam1", "restricted_area")
+	require.Equal(t, sirenUnavailable, sirenOf(t, s, e2.ID))
+}
+
+// holdFirstPlay makes the first play(camera, src) block until release is
+// closed; entered is closed once it is in flight.
+func holdFirstPlay(p *fakePlayer) (entered, release chan struct{}) {
+	entered, release = make(chan struct{}), make(chan struct{})
+	var held atomic.Bool
+	p.gate = func(_, source string) {
+		if source != "" && held.CompareAndSwap(false, true) {
+			close(entered)
+			<-release
+		}
+	}
+	return
+}
+
+// An event that arrives while the start is in flight joins it: one play call,
+// and it gets the start's outcome.
+func TestSirenEventDuringStartGetsItsOutcome(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		p := &fakePlayer{fail: fail}
+		entered, release := holdFirstPlay(p)
+		s, _ := newTestSiren(p)
+
+		done := make(chan Event)
+		go func() {
+			e, _ := s.add(Event{Camera: "cam1", UseCase: "intrusion", Label: "person", Confidence: 0.9})
+			done <- e
+		}()
+		<-entered
+		e2 := addAlert(t, s, "cam1", "intrusion") // returns at once: a start is in flight
+		close(release)
+		e1 := <-done
+
+		want := sirenRinging
+		if fail {
+			want = sirenUnavailable
+		}
+		require.Len(t, p.got(), 1, "fail=%v", fail)
+		require.Equal(t, want, sirenOf(t, s, e1.ID), "fail=%v", fail)
+		require.Equal(t, want, sirenOf(t, s, e2.ID), "fail=%v", fail)
+	}
+}
+
+// Everything acknowledged while play(cam, src) is still dialling: once it
+// returns, the siren is stopped at once instead of ringing until max.
+func TestSirenAckWhilePlayInFlight(t *testing.T) {
+	p := &fakePlayer{}
+	entered, release := holdFirstPlay(p)
+	s, sir := newTestSiren(p)
+
+	done := make(chan Event)
+	go func() {
+		e, _ := s.add(Event{Camera: "cam1", UseCase: "intrusion", Label: "person", Confidence: 0.9})
+		done <- e
+	}()
+	<-entered
+	e2 := addAlert(t, s, "cam1", "fire")
+	ackAlert(t, s, sir, 1)
+	ackAlert(t, s, sir, e2.ID) // both return at once: the start in flight will stop it
+	close(release)
+	e1 := <-done
+
+	require.Equal(t, [][2]string{{"cam1", testSirenSrc}, {"cam1", ""}}, p.got())
+	require.NotEqual(t, sirenRinging, sirenOf(t, s, e1.ID))
+	require.NotEqual(t, sirenRinging, sirenOf(t, s, e2.ID))
+
+	time.Sleep(150 * time.Millisecond) // no max timer may be left behind
+	require.Len(t, p.got(), 2)
+}
+
+func TestWriteSirenWAV(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "siren.wav")
+	require.NoError(t, writeSirenWAV(path))
+
+	b, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "RIFF", string(b[:4]))
+	require.Equal(t, "WAVE", string(b[8:12]))
+	require.Len(t, b, 44+2*8000*2)
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	old := info.ModTime().Add(-time.Hour)
+	require.NoError(t, os.Chtimes(path, old, old))
+	require.NoError(t, writeSirenWAV(path))
+	info, err = os.Stat(path)
+	require.NoError(t, err)
+	require.True(t, info.ModTime().Equal(old), "rewritten: %v", info.ModTime())
+}
