@@ -44,4 +44,4 @@ cctv:
 
 log:
   level: info
-  cctv: debug
+  cctv: info
