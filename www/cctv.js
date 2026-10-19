@@ -2,10 +2,13 @@
 // cctv-logic.js. Text that comes from the server only reaches the DOM through
 // textContent (see el()), never through innerHTML.
 import './video-stream.js';
-import {USE_CASES} from './cctv-logic.js';
+import {
+    USE_CASES, describe, areaOf, detailOf, boxOf, snapshotState, snapshotSrc, sirenText, Incidents,
+} from './cctv-logic.js';
 
 const STATUS_EVERY = 5000; // ms between GET api/cctv/status
 const MAX_PILLS = 3; // use-case chips shown on a tile before "+N"
+const FETCH_TIMEOUT = 5000; // ms before any fetch gives up
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -86,6 +89,7 @@ function describeTile(t, place, useCases) {
     const key = JSON.stringify([place, useCases]);
     if (key === t.key) return;
     t.key = key;
+    t.place = place;
 
     t.sub.textContent = place ? `· ${place}` : '';
 
@@ -132,6 +136,7 @@ function showStatusUnavailable() {
     chip.classList.remove('warn');
     chip.classList.add('bad');
     chip.textContent = 'status unavailable';
+    $('kpi-online').textContent = '–';
     $('kpi-online-note').textContent = 'status unavailable';
 }
 
@@ -179,16 +184,18 @@ function renderStatus(list) {
 
     setOnlineChip(online, seen.size);
     $('armed').replaceChildren(el('b', '', useCases.size), ' use cases configured');
+    syncAlarm(); // a tile made just now may belong to the open incident
 }
 
 async function refreshStatus() {
     try {
-        const r = await fetch('api/cctv/status', {cache: 'no-cache'});
+        const r = await fetch('api/cctv/status', {cache: 'no-cache', signal: AbortSignal.timeout(FETCH_TIMEOUT)});
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const list = await r.json();
         if (!Array.isArray(list)) throw new Error('status is not a list');
         renderStatus(list);
-    } catch {
+    } catch (err) {
+        console.warn('[cctv] camera status unavailable:', err);
         showStatusUnavailable(); // tiles stay as they are
     }
 }
@@ -201,6 +208,547 @@ async function pollStatus() {
 // ---------------------------------------------------------------------------
 // Alerts: feed, live push, popup, acknowledge (Task 9)
 // ---------------------------------------------------------------------------
+
+const FEED_MAX = 50; // rows kept in #feed, as many as GET api/cctv/events?limit=50 gives
+const SNAP_RECHECK = 1000; // ms between re-checks while the popup waits for a snapshot
+const REACHED_MAX = 200; // arrival times kept
+
+const feed = $('feed');
+const modal = $('modal');
+const incidents = new Incidents();
+/** id -> latest version of each event in the feed. */
+const known = new Map();
+/** id -> feed row element. */
+const rows = new Map();
+/** id -> ms from the incident to this page, for events that arrived by push. */
+const reachedIn = new Map();
+const feedEmpty = el('div', 'empty', 'No alerts yet');
+
+/**
+ * What the open popup follows: {} = incidents.current(), {id} = the event
+ * clicked in the feed (or its incident). null while the popup is closed.
+ */
+let view = null;
+let shown = null; // what renderPopup drew: {events, latest, ackIds, others}
+let snapTimer = 0; // the one pending snapshot re-check
+let ackError = null; // {ids, msg} after a failed Acknowledge
+let bigTile = null; // the tile enlarged by "Open live view"
+
+const isEvent = (e) => e !== null && typeof e === 'object' && Number.isFinite(e.id)
+    && typeof e.camera === 'string' && typeof e.use_case === 'string';
+const isAcked = (e) => Boolean(e.acknowledged_at);
+const newestFirst = (a, b) => b.id - a.id;
+
+// Go writes nanoseconds; keep milliseconds so every browser parses it.
+const parseTime = (t) => Date.parse(typeof t === 'string' ? t.replace(/(\.\d{3})\d+/, '$1') : '');
+const pad = (n) => String(n).padStart(2, '0');
+
+function hms(t) {
+    const d = new Date(parseTime(t));
+    return Number.isNaN(d.getTime()) ? '–' : `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function dayOf(t) {
+    const d = new Date(parseTime(t));
+    return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString('en-GB', {day: '2-digit', month: 'short', year: 'numeric'});
+}
+
+/** Confidence as a whole percent 0..100, or null if it isn't a number. */
+function percent(c) {
+    return typeof c === 'number' && Number.isFinite(c) ? Math.round(Math.min(1, Math.max(0, c)) * 100) : null;
+}
+
+const ICONS = {
+    intrusion: ['M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z', 'M12 8v5', 'M12 16h.01'],
+    restricted_area: ['M12 3a9 9 0 100 18 9 9 0 000-18z', 'M7 12h10'],
+    fire: ['M12 3c1 4 5 5 5 10a5 5 0 01-10 0c0-3 2-4 2-6 2 1 3 2 3 4'],
+    fall: ['M12 3a2 2 0 100 4 2 2 0 000-4z', 'M5 20l4-6 4 2 4-5', 'M3 21h18'],
+    tampering: ['M3 7h12v10H3z', 'M15 10l6-3v10l-6-3', 'M2 3l20 18'],
+    baby_crying: ['M4 10v4h4l5 4V6L8 10z', 'M16 9a4 4 0 010 6', 'M19 6a8 8 0 010 12'],
+    face_recognition: ['M4 8V5a1 1 0 011-1h3', 'M16 4h3a1 1 0 011 1v3', 'M20 16v3a1 1 0 01-1 1h-3',
+        'M8 20H5a1 1 0 01-1-1v-3', 'M12 8a3 3 0 100 6 3 3 0 000-6z'],
+    power_when_absent: ['M13 2L4 14h7l-1 8 9-12h-7z'],
+    occupancy: ['M9 7a3 3 0 100 6 3 3 0 000-6z', 'M3 20c1-4 3.5-5 6-5s5 1 6 5', 'M16 8a2.5 2.5 0 110 5',
+        'M18 15c2 .5 3 2 3.5 5'],
+    vehicle_lpr: ['M3 13l2-5h14l2 5v5H3z', 'M7 18v2', 'M17 18v2', 'M3 13h18'],
+};
+const BELL = ['M6 8a6 6 0 1112 0c0 7 3 8 3 8H3s3-1 3-8', 'M10 20a2 2 0 004 0'];
+
+/** The use case's icon as an <svg>, built node by node. */
+function icon(useCase) {
+    const ns = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(ns, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '2');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    for (const d of Object.hasOwn(ICONS, useCase) ? ICONS[useCase] : BELL) {
+        const p = document.createElementNS(ns, 'path');
+        p.setAttribute('d', d);
+        svg.appendChild(p);
+    }
+    return svg;
+}
+
+const placeOf = (camera) => (tiles.has(camera) && tiles.get(camera).place) || '';
+
+/** The tile of the current incident's camera glows. */
+function syncAlarm() {
+    const cur = incidents.current();
+    for (const [name, t] of tiles) t.el.classList.toggle('alarm', cur !== null && name === cur.camera);
+}
+
+// --- feed ------------------------------------------------------------------
+
+function feedRow(e, isNew) {
+    const d = describe(e);
+    const row = el('div', `ev sev-${d.severity}`);
+    row.classList.toggle('new', isNew);
+    row.classList.toggle('acked', isAcked(e));
+    row.classList.toggle('quiet', !d.popup);
+    row.tabIndex = 0;
+    row.setAttribute('role', 'button');
+    row.addEventListener('click', () => openEvent(e.id));
+    row.addEventListener('keydown', (ev) => {
+        if (ev.key !== 'Enter' && ev.key !== ' ') return;
+        ev.preventDefault();
+        openEvent(e.id);
+    });
+
+    const th = el('div', 'th');
+    const src = snapshotSrc(e);
+    if (src) {
+        const img = el('img');
+        img.alt = '';
+        img.loading = 'lazy';
+        img.addEventListener('error', () => img.replaceWith(icon(e.use_case)), {once: true});
+        img.src = src;
+        th.appendChild(img);
+    } else {
+        th.appendChild(icon(e.use_case));
+    }
+
+    const t1 = el('div', 't1');
+    t1.appendChild(el('span', 'tt', d.title));
+    if (d.popup && !isAcked(e)) t1.appendChild(el('span', 'ua', 'Unacknowledged'));
+
+    const t3 = el('div', 't3');
+    t3.appendChild(el('span', 'mono', hms(e.time)));
+    const p = percent(e.confidence);
+    if (p !== null) {
+        const bar = el('span', 'b');
+        const fill = el('i');
+        fill.style.width = `${p}%`;
+        bar.appendChild(fill);
+        const conf = el('span', 'conf');
+        conf.append(`${p}%`, bar);
+        t3.appendChild(conf);
+    }
+
+    const body = el('div', 'bd');
+    body.append(t1, el('div', 't2', `${e.camera} · ${areaOf(e)}`), t3);
+    row.append(th, body);
+    return row;
+}
+
+/** Empty state and the unacknowledged count in the panel header. */
+function feedChanged() {
+    if (rows.size === 0 && !feedEmpty.isConnected) feed.replaceChildren(feedEmpty);
+    if (rows.size > 0) feedEmpty.remove();
+
+    let unacked = 0;
+    for (const e of known.values()) if (describe(e).popup && !isAcked(e)) unacked++;
+    const count = $('feed-count');
+    count.hidden = unacked === 0;
+    count.textContent = `${unacked} unacknowledged`;
+}
+
+function renderFeed() {
+    rows.clear();
+    const list = [...known.values()].sort(newestFirst);
+    feed.replaceChildren(...list.map((e) => {
+        const row = feedRow(e, false);
+        rows.set(e.id, row);
+        return row;
+    }));
+    feedChanged();
+}
+
+function feedAdd(e) {
+    if (rows.has(e.id)) {
+        feedReplace(e);
+        return;
+    }
+    known.set(e.id, e);
+    const row = feedRow(e, true);
+    rows.set(e.id, row);
+    feed.prepend(row);
+    while (rows.size > FEED_MAX) {
+        const oldest = Math.min(...rows.keys());
+        rows.get(oldest).remove();
+        rows.delete(oldest);
+        known.delete(oldest);
+    }
+    feedChanged();
+}
+
+function feedReplace(e) {
+    const old = rows.get(e.id);
+    if (!old) return; // not in the feed (older than its last 50)
+    known.set(e.id, e);
+    const row = feedRow(e, false);
+    old.replaceWith(row);
+    rows.set(e.id, row);
+    feedChanged();
+}
+
+// --- list + push -------------------------------------------------------------
+
+let held = null; // push messages held back while the list loads, replayed after it
+let listLoading = false;
+let listAgain = false;
+
+/**
+ * GET api/cctv/events?limit=50 into the feed. Pushes that arrive meanwhile
+ * are held and replayed afterwards, so a list fetched a moment too early
+ * can't undo them. Old events don't pop up, except a siren still ringing.
+ */
+async function loadFeed() {
+    if (listLoading) {
+        listAgain = true; // e.g. the stream opened during the first load
+        return;
+    }
+    listLoading = true;
+    held = [];
+    try {
+        do {
+            listAgain = false;
+            const r = await fetch('api/cctv/events?limit=50', {cache: 'no-cache', signal: AbortSignal.timeout(FETCH_TIMEOUT)});
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const list = await r.json();
+            if (!Array.isArray(list)) throw new Error('events is not a list');
+            applyList(list.filter(isEvent));
+        } while (listAgain);
+    } catch (err) {
+        console.warn('[cctv] alert list unavailable:', err);
+        if (rows.size === 0) feedEmpty.textContent = 'Alert list unavailable';
+    } finally {
+        const replay = held;
+        held = null;
+        listLoading = false;
+        for (const [type, e] of replay) onPush(type, e);
+    }
+}
+
+function applyList(list) {
+    known.clear();
+    for (const e of list) known.set(e.id, e);
+    feedEmpty.textContent = 'No alerts yet';
+    renderFeed();
+
+    let pop = false;
+    for (const e of [...known.values()].sort((a, b) => a.id - b.id)) { // oldest first: the newest ends current
+        if (e.siren === 'ringing' && !isAcked(e)) {
+            if (!incidents.groupOf(e.id)) pop = true;
+            incidents.add(e);
+        } else {
+            incidents.update(e); // catches acks missed while disconnected
+        }
+    }
+    alertsChanged(pop);
+}
+
+function onPush(type, e) {
+    if (held) {
+        held.push([type, e]);
+        return;
+    }
+    if (type === 'alert') {
+        feedAdd(e);
+        const before = incidents.groupOf(e.id);
+        incidents.add(e);
+        const cur = incidents.current();
+        const pop = cur !== null && cur.events.some((x) => x.id === e.id)
+            && (before === null || before.key !== cur.key);
+        alertsChanged(pop);
+    } else {
+        applyUpdate(e);
+        alertsChanged(false);
+    }
+}
+
+/** An event changed: SSE "update", or the answer to Acknowledge. */
+function applyUpdate(e) {
+    feedReplace(e);
+    incidents.update(e);
+}
+
+/** After any change to incidents: the glow, then pop up or refresh the popup. */
+function alertsChanged(pop) {
+    syncAlarm();
+    if (pop) {
+        view = {};
+        renderPopup();
+    } else if (view) {
+        renderPopup();
+    }
+}
+
+function noteArrival(e) {
+    if (reachedIn.has(e.id)) return;
+    const t = parseTime(e.time);
+    if (Number.isNaN(t)) return;
+    reachedIn.set(e.id, Math.max(0, Date.now() - t));
+    if (reachedIn.size > REACHED_MAX) reachedIn.delete(reachedIn.keys().next().value);
+}
+
+function connect() {
+    const es = new EventSource('api/cctv/events/stream');
+    es.addEventListener('open', () => loadFeed()); // also after a reconnect, for what was missed
+    for (const type of ['alert', 'update']) {
+        es.addEventListener(type, (m) => {
+            let e;
+            try {
+                e = JSON.parse(m.data);
+            } catch (err) {
+                console.warn('[cctv] bad push message:', err);
+                return;
+            }
+            if (!isEvent(e)) return;
+            if (type === 'alert') noteArrival(e); // now, not when a held message is replayed
+            onPush(type, e);
+        });
+    }
+    es.addEventListener('error', () => {
+        if (es.readyState !== EventSource.CLOSED) return; // the browser retries by itself
+        console.warn('[cctv] alert stream closed; retrying in 5 s');
+        setTimeout(connect, 5000);
+    });
+}
+
+// --- popup ---------------------------------------------------------------------
+
+/** {events, latest, ackIds, others} for the current view, or null if nothing is left to show. */
+function popupData() {
+    const groups = incidents.current() ? incidents.others() + 1 : 0;
+    const g = view.id === undefined ? incidents.current() : incidents.groupOf(view.id);
+    if (g) return {events: g.events, latest: g.latest, ackIds: incidents.ids(g.key), others: groups - 1};
+
+    const e = known.get(view.id);
+    if (!e) return null;
+    const ackIds = describe(e).popup && !isAcked(e) ? [e.id] : [];
+    return {events: [e], latest: e, ackIds, others: groups};
+}
+
+function renderPopup() {
+    clearTimeout(snapTimer);
+    snapTimer = 0;
+    const p = view && popupData();
+    if (!p) {
+        closePopup();
+        return;
+    }
+    shown = p;
+    const e = p.latest;
+    const d = describe(e);
+
+    modal.className = `sev-${d.severity}`;
+    $('m-icon').replaceChildren(icon(e.use_case));
+    $('m-title').textContent = d.title;
+    $('m-detail').textContent = detailOf(e);
+    $('m-sev').textContent = d.severity;
+    const more = [];
+    if (p.events.length > 1) more.push(`×${p.events.length} detections`);
+    if (p.others > 0) more.push(`+${p.others} more`);
+    $('m-more').textContent = more.join(' · ');
+
+    const opening = modal.hidden;
+    modal.hidden = false; // before renderSnap, which measures the snapshot area
+    renderSnap(e);
+
+    $('m-time').textContent = `${dayOf(e.time)} ${hms(e.time)}`.trim();
+    const place = placeOf(e.camera);
+    $('m-cam').textContent = place ? `${e.camera} · ${place}` : e.camera;
+    $('m-area').textContent = areaOf(e);
+    const pc = percent(e.confidence);
+    $('m-conf').textContent = pc === null ? '–' : `${pc}%`;
+    $('m-bar').style.width = `${pc === null ? 0 : pc}%`;
+
+    const siren = sirenText(e);
+    const sirenEl = $('m-siren');
+    sirenEl.textContent = siren;
+    sirenEl.classList.toggle('ringing', e.siren === 'ringing');
+    sirenEl.parentElement.hidden = siren === '';
+
+    const ids = p.ackIds.join(',');
+    const ms = reachedIn.get(e.id);
+    $('m-hint').textContent = ackError && ackError.ids === ids ? ackError.msg
+        : ms !== undefined ? `Reached screen ${(ms / 1000).toFixed(1)} s after the incident`
+            : isAcked(e) ? `Acknowledged at ${hms(e.acknowledged_at)}` : '';
+    $('m-ack').hidden = p.ackIds.length === 0;
+    $('m-live').hidden = !tiles.has(e.camera);
+
+    if (opening) modal.querySelector('.modal').focus({preventScroll: true});
+}
+
+function renderSnap(e) {
+    const snap = $('m-snap');
+    const img = $('m-img');
+    const msg = $('m-snap-msg');
+    const src = snapshotSrc(e);
+    // a snapshot string that isn't ours is never shown, and not waited for either
+    const state = src ? 'ready' : e.snapshot ? 'none' : snapshotState(e, Date.now());
+
+    $('m-stamp').textContent = `${dayOf(e.time)} ${hms(e.time)} · ${e.camera}`;
+    if (state === 'ready') {
+        if (img.getAttribute('src') !== src) {
+            delete img.dataset.failed;
+            img.src = src; // the load handler shows it
+        }
+        const loaded = img.complete && img.naturalWidth > 0;
+        const failed = Boolean(img.dataset.failed);
+        img.hidden = !loaded;
+        snap.classList.toggle('loading', !loaded && !failed);
+        msg.textContent = failed ? 'No snapshot available' : '';
+        if (loaded) placeBox(e);
+        else $('m-box').hidden = true;
+        return;
+    }
+
+    img.hidden = true;
+    img.removeAttribute('src');
+    delete img.dataset.failed;
+    $('m-box').hidden = true;
+    snap.classList.toggle('loading', state === 'loading');
+    msg.textContent = state === 'loading' ? 'Getting snapshot…' : 'No snapshot available';
+    if (state === 'loading') snapTimer = setTimeout(renderPopup, SNAP_RECHECK);
+}
+
+/** data.box over the picture itself, not over the letterbox around it. */
+function placeBox(e) {
+    const box = $('m-box');
+    const img = $('m-img');
+    const snap = $('m-snap');
+    const b = boxOf(e);
+    const cw = snap.clientWidth;
+    const ch = snap.clientHeight;
+    if (!b || img.hidden || !img.naturalWidth || !cw || !ch) {
+        box.hidden = true;
+        return;
+    }
+    const k = Math.min(cw / img.naturalWidth, ch / img.naturalHeight); // object-fit: contain
+    const w = img.naturalWidth * k;
+    const h = img.naturalHeight * k;
+    const x0 = (cw - w) / 2;
+    const y0 = (ch - h) / 2;
+    const top = y0 + b[1] * h;
+    box.style.left = `${(x0 + b[0] * w) / cw * 100}%`;
+    box.style.top = `${top / ch * 100}%`;
+    box.style.width = `${(b[2] - b[0]) * w / cw * 100}%`;
+    box.style.height = `${(b[3] - b[1]) * h / ch * 100}%`;
+
+    const pc = percent(e.confidence);
+    const label = [e.label, pc === null ? '' : `${pc}%`].filter(Boolean).join(' ');
+    box.replaceChildren(...(label ? [el('span', 'lb', label)] : []));
+    box.classList.toggle('in', top < 22); // no room for the label above the box
+    box.hidden = false;
+}
+
+$('m-img').addEventListener('load', () => {
+    if (!shown) return;
+    const img = $('m-img');
+    img.hidden = false;
+    $('m-snap').classList.remove('loading');
+    $('m-snap-msg').textContent = '';
+    placeBox(shown.latest);
+});
+
+$('m-img').addEventListener('error', () => {
+    const img = $('m-img');
+    if (!img.getAttribute('src')) return; // src removed on purpose
+    img.dataset.failed = '1';
+    img.hidden = true;
+    $('m-box').hidden = true;
+    $('m-snap').classList.remove('loading');
+    $('m-snap-msg').textContent = 'No snapshot available';
+});
+
+function closePopup() {
+    clearTimeout(snapTimer);
+    snapTimer = 0;
+    view = null;
+    shown = null;
+    modal.hidden = true;
+}
+
+function openEvent(id) {
+    view = {id};
+    renderPopup();
+}
+
+async function acknowledge() {
+    const p = shown;
+    if (!p || p.ackIds.length === 0) return;
+    const ids = p.ackIds.join(',');
+    const btn = $('m-ack');
+    btn.disabled = true;
+    try {
+        const r = await fetch('api/cctv/events/ack', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ids: p.ackIds}),
+            signal: AbortSignal.timeout(FETCH_TIMEOUT),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const list = await r.json();
+        if (!Array.isArray(list)) throw new Error('ack answer is not a list');
+        ackError = null;
+        if (view) view = {}; // then the next incident shows, or the popup closes
+        for (const e of list) if (isEvent(e)) applyUpdate(e);
+        alertsChanged(false);
+    } catch (err) {
+        console.warn('[cctv] acknowledge failed:', err);
+        ackError = {ids, msg: 'Could not acknowledge. Try again.'};
+        if (view) renderPopup();
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+function setBig(tile) {
+    if (bigTile) {
+        bigTile.classList.remove('big');
+        bigTile.title = '';
+    }
+    bigTile = tile;
+    if (tile) {
+        tile.classList.add('big');
+        tile.title = 'Click or press Escape to restore';
+    }
+}
+
+function openLiveView() {
+    const camera = shown && shown.latest.camera;
+    closePopup(); // without acknowledging
+    if (tiles.has(camera)) setBig(tiles.get(camera).el);
+}
+
+$('m-ack').addEventListener('click', acknowledge);
+$('m-live').addEventListener('click', openLiveView);
+$('m-close').addEventListener('click', closePopup);
+modal.addEventListener('click', (ev) => {
+    if (ev.target === modal) closePopup(); // a click on the dimmed backdrop
+});
+$('cams').addEventListener('click', (ev) => {
+    if (bigTile && bigTile.contains(ev.target)) setBig(null); // the second click restores it
+});
+document.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Escape') return;
+    if (!modal.hidden) closePopup();
+    else if (bigTile) setBig(null);
+});
 
 // ---------------------------------------------------------------------------
 // Numbers, timeline, simulate (Task 10)
@@ -215,3 +763,5 @@ $('simulate').hidden = params.get('demo') !== '1';
 tick();
 setInterval(tick, 1000);
 pollStatus();
+connect(); // its open event loads the alert list
+loadFeed();

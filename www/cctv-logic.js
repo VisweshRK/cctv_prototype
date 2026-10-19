@@ -102,6 +102,28 @@ export function snapshotState(e, now) {
     return now - t < SNAPSHOT_WAIT ? 'loading' : 'none';
 }
 
+const SNAPSHOT_PREFIX = 'api/cctv/snapshot?id=';
+
+/**
+ * The image URL to show for an event, or '' if none. Only the server's own
+ * snapshot URLs are used: clients can POST any string as snapshot.
+ */
+export function snapshotSrc(e) {
+    const s = e && e.snapshot;
+    return typeof s === 'string' && s.startsWith(SNAPSHOT_PREFIX) ? s : '';
+}
+
+/**
+ * The popup's siren line (shown after a "Siren" label), or '' when the use
+ * case has no siren. Raw text.
+ */
+export function sirenText(e) {
+    if (!describe(e).siren) return '';
+    if (e.siren === 'ringing') return `ringing on ${e.camera}`;
+    if (e.siren === 'unavailable') return 'camera speaker not available';
+    return 'off'; // stopped, or not (yet) rung
+}
+
 const isAcked = (e) => Boolean(e.acknowledged_at);
 const keyOf = (e) => `${e.camera}|${e.use_case}`;
 
@@ -155,12 +177,21 @@ export class Incidents {
         this.add(e); // ignores it if acknowledged or not a popup
     }
 
+    static #view(g) {
+        const events = [...g.events];
+        return {key: g.key, camera: g.camera, useCase: g.useCase, events, latest: events[events.length - 1]};
+    }
+
     /** @returns {{key, camera, useCase, events, latest} | null} */
     current() {
         const g = [...this.#groups.values()].pop();
-        if (!g) return null;
-        const events = [...g.events];
-        return {key: g.key, camera: g.camera, useCase: g.useCase, events, latest: events[events.length - 1]};
+        return g ? Incidents.#view(g) : null;
+    }
+
+    /** The queued group holding event id, shaped like current(), or null. */
+    groupOf(id) {
+        const found = this.#find(id);
+        return found ? Incidents.#view(found.g) : null;
     }
 
     others() {

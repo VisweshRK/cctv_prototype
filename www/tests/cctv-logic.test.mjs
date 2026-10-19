@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 
 import {
-    USE_CASES, describe, areaOf, detailOf, boxOf, esc, snapshotState,
+    USE_CASES, describe, areaOf, detailOf, boxOf, esc, snapshotState, snapshotSrc, sirenText,
     Incidents, summarize, simulated,
 } from '../cctv-logic.js';
 
@@ -143,6 +143,42 @@ test('snapshotState', () => {
     assert.equal(snapshotState(ev({}), t + 5000), 'loading');
     assert.equal(snapshotState(ev({}), t + 13000), 'none');
     assert.equal(snapshotState(ev({time: 'not a time'}), t), 'none');
+});
+
+test('snapshotSrc: only the server snapshot URLs', () => {
+    assert.equal(snapshotSrc(ev({snapshot: 'api/cctv/snapshot?id=7'})), 'api/cctv/snapshot?id=7');
+    assert.equal(snapshotSrc(ev({})), '');
+    assert.equal(snapshotSrc(ev({snapshot: ''})), '');
+    assert.equal(snapshotSrc(ev({snapshot: 'http://evil.example/x.jpg'})), '');
+    assert.equal(snapshotSrc(ev({snapshot: 'javascript:alert(1)'})), '');
+    assert.equal(snapshotSrc(ev({snapshot: '/api/cctv/snapshot?id=7'})), '');
+    assert.equal(snapshotSrc(ev({snapshot: 7})), '');
+    assert.equal(snapshotSrc(null), '');
+});
+
+test('sirenText', () => {
+    assert.equal(sirenText(ev({siren: 'ringing'})), 'ringing on cam1');
+    assert.equal(sirenText(ev({siren: 'unavailable'})), 'camera speaker not available');
+    assert.equal(sirenText(ev({siren: 'stopped'})), 'off');
+    assert.equal(sirenText(ev({})), 'off');
+    assert.equal(sirenText(ev({use_case: 'fire', camera: 'cam2', siren: 'ringing'})), 'ringing on cam2');
+    assert.equal(sirenText(ev({use_case: 'fall', siren: 'ringing'})), ''); // no siren for this use case
+    assert.equal(sirenText(ev({use_case: 'nope'})), '');
+});
+
+test('Incidents: groupOf finds the group of an event id', () => {
+    const q = new Incidents();
+    q.add(ev({id: 1}));
+    q.add(ev({id: 2, use_case: 'fire'}));
+    q.add(ev({id: 3}));
+    const g = q.groupOf(1);
+    assert.equal(g.key, 'cam1|intrusion');
+    assert.deepEqual(g.events.map((x) => x.id), [1, 3]);
+    assert.equal(g.latest.id, 3);
+    assert.equal(q.groupOf(2).key, 'cam1|fire');
+    assert.equal(q.groupOf(99), null);
+    g.events.push(ev({id: 50})); // a copy
+    assert.deepEqual(q.ids('cam1|intrusion'), [1, 3]);
 });
 
 test('Incidents: groups by camera and use case, newest group first', () => {
