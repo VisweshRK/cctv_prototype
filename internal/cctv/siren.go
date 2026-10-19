@@ -89,14 +89,20 @@ func (s *siren) onEvent(e Event) {
 		return
 	}
 	c := s.camera(e.Camera)
+	if len(c.pending) > 0 {
+		s.dropTrimmed(c)
+		if len(c.pending) == 0 {
+			c.cutOff = false // nothing left to acknowledge: may ring again
+		}
+	}
 	c.pending[e.ID] = true
 	switch {
 	case c.cutOff:
 		s.setSiren(e.ID, sirenStopped)
-	case c.want && c.on: // already ringing: the timer is not restarted
+	case c.want && c.on && !c.busy: // already ringing: the timer is not restarted
 		c.rung = append(c.rung, e.ID)
 		s.setSiren(e.ID, sirenRinging)
-	default: // start a ring cycle, or join the start in flight
+	default: // start a ring cycle, or join the start (or stop, then restart) in flight
 		c.want = true
 		c.joined = append(c.joined, e.ID)
 	}
@@ -113,6 +119,7 @@ func (s *siren) onAck(e Event) {
 	}
 	delete(c.pending, e.ID)
 	s.stopRinging(e.ID)
+	s.dropTrimmed(c)
 
 	if len(c.pending) == 0 {
 		if c.timer != nil {
@@ -209,6 +216,17 @@ func (s *siren) started(camera string, c *sirenCamera, err error) {
 		if c.pending[id] {
 			c.rung = append(c.rung, id)
 			s.setSiren(id, sirenRinging)
+		}
+	}
+}
+
+// dropTrimmed forgets pending events the store no longer keeps: they can
+// never be acknowledged, so they must not hold the camera's siren. Call with
+// s.mu held.
+func (s *siren) dropTrimmed(c *sirenCamera) {
+	for id := range c.pending {
+		if _, ok := s.store.get(id); !ok {
+			delete(c.pending, id)
 		}
 	}
 }

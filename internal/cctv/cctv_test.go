@@ -539,12 +539,13 @@ func TestPruneDeletesOldSnapshots(t *testing.T) {
 }
 
 // fakePlayer records every (camera, source) call; fail makes it error, and
-// gate (if set) runs inside the call, so a test can hold a play in flight.
+// gate (if set) runs inside the call, so a test can hold a play in flight,
+// and an error from it fails that call.
 type fakePlayer struct {
 	mu    sync.Mutex
 	calls [][2]string
 	fail  bool
-	gate  func(camera, source string)
+	gate  func(camera, source string) error
 }
 
 func (p *fakePlayer) play(camera, source string) error {
@@ -553,7 +554,9 @@ func (p *fakePlayer) play(camera, source string) error {
 	fail, gate := p.fail, p.gate
 	p.mu.Unlock()
 	if gate != nil {
-		gate(camera, source)
+		if err := gate(camera, source); err != nil {
+			return err
+		}
 	}
 	if fail {
 		return errors.New("no speaker")
@@ -571,7 +574,12 @@ const testSirenSrc = "ffmpeg:siren.wav#audio=pcmu#input=file"
 
 // newTestSiren wires a siren to a fresh store the way Init will: through onAdd.
 func newTestSiren(p *fakePlayer) (*eventStore, *siren) {
-	s := newEventStore("", 100)
+	return newTestSirenMax(p, 100)
+}
+
+// newTestSirenMax is newTestSiren with a store that keeps max events.
+func newTestSirenMax(p *fakePlayer, max int) (*eventStore, *siren) {
+	s := newEventStore("", max)
 	sir := newSiren(p.play, testSirenSrc, []string{"intrusion", "restricted_area", "fire"}, 100*time.Millisecond, s)
 	s.onAdd = func(e Event, _ []byte) { sir.onEvent(e) }
 	return s, sir
@@ -647,10 +655,8 @@ func TestSirenCutOffAndStaysQuiet(t *testing.T) {
 	s, sir := newTestSiren(p)
 
 	e1 := addAlert(t, s, "cam1", "intrusion")
-	time.Sleep(200 * time.Millisecond) // past max
+	requireCutOff(t, p, s, e1.ID)
 	calls := p.got()
-	require.Equal(t, [2]string{"cam1", ""}, calls[len(calls)-1])
-	require.Equal(t, sirenStopped, sirenOf(t, s, e1.ID))
 
 	e2 := addAlert(t, s, "cam1", "intrusion") // e1 still unacknowledged: stay quiet
 	require.Len(t, p.got(), len(calls))
@@ -675,16 +681,28 @@ func TestSirenUnavailable(t *testing.T) {
 	require.Equal(t, sirenUnavailable, sirenOf(t, s, e2.ID))
 }
 
+// requireCutOff waits for max to pass: the last call is a stop and the event
+// is stopped.
+func requireCutOff(t *testing.T, p *fakePlayer, s *eventStore, id int64) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		calls := p.got()
+		e, _ := s.get(id)
+		return calls[len(calls)-1] == [2]string{"cam1", ""} && e.Siren == sirenStopped
+	}, 2*time.Second, 5*time.Millisecond)
+}
+
 // holdFirstPlay makes the first play(camera, src) block until release is
 // closed; entered is closed once it is in flight.
 func holdFirstPlay(p *fakePlayer) (entered, release chan struct{}) {
 	entered, release = make(chan struct{}), make(chan struct{})
 	var held atomic.Bool
-	p.gate = func(_, source string) {
+	p.gate = func(_, source string) error {
 		if source != "" && held.CompareAndSwap(false, true) {
 			close(entered)
 			<-release
 		}
+		return nil
 	}
 	return
 }
@@ -742,6 +760,80 @@ func TestSirenAckWhilePlayInFlight(t *testing.T) {
 
 	time.Sleep(150 * time.Millisecond) // no max timer may be left behind
 	require.Len(t, p.got(), 2)
+}
+
+// Events that arrive while a stop is in flight both join the restart that
+// follows, so a failed restart leaves neither of them ringing.
+func TestSirenEventsDuringStopJoinTheRestart(t *testing.T) {
+	p := &fakePlayer{}
+	s, sir := newTestSiren(p)
+	e0 := addAlert(t, s, "cam1", "intrusion")
+
+	entered, release := make(chan struct{}), make(chan struct{})
+	p.mu.Lock()
+	p.gate = func(_, source string) error {
+		if source == "" {
+			close(entered)
+			<-release
+			return nil
+		}
+		return errors.New("no speaker") // the restart fails
+	}
+	p.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		e, _ := s.get(e0.ID)
+		sir.onAck(e) // drives the stop, which is held
+		close(done)
+	}()
+	<-entered
+	e1 := addAlert(t, s, "cam1", "intrusion")
+	e2 := addAlert(t, s, "cam1", "fire")
+	close(release)
+	<-done
+
+	require.Equal(t, [][2]string{{"cam1", testSirenSrc}, {"cam1", ""}, {"cam1", testSirenSrc}}, p.got())
+	require.Equal(t, sirenUnavailable, sirenOf(t, s, e1.ID))
+	require.Equal(t, sirenUnavailable, sirenOf(t, s, e2.ID))
+}
+
+// A pending siren event the store has trimmed can never be acknowledged, so
+// it must not keep its camera quiet forever.
+func TestSirenForgetsTrimmedEvents(t *testing.T) {
+	p := &fakePlayer{}
+	s, _ := newTestSirenMax(p, 2)
+
+	e1 := addAlert(t, s, "cam1", "intrusion")
+	requireCutOff(t, p, s, e1.ID)
+	addAlert(t, s, "cam1", "fall")
+	addAlert(t, s, "cam1", "fall") // e1 is trimmed
+	_, ok := s.get(e1.ID)
+	require.False(t, ok)
+
+	e2 := addAlert(t, s, "cam1", "intrusion")
+	calls := p.got()
+	require.Equal(t, [2]string{"cam1", testSirenSrc}, calls[len(calls)-1])
+	require.Equal(t, sirenRinging, sirenOf(t, s, e2.ID))
+}
+
+// The real ack path: POST /api/cctv/events/ack reaches the siren via onAck.
+func TestSirenStoppedByAckEndpoint(t *testing.T) {
+	p := &fakePlayer{}
+	s, sir := newTestSiren(p)
+	s.onAck = sir.onAck
+	e := addAlert(t, s, "cam1", "intrusion")
+
+	r := httptest.NewRequest("POST", "/api/cctv/events/ack", strings.NewReader(`{"id":`+strconv.FormatInt(e.ID, 10)+`}`))
+	w := httptest.NewRecorder()
+	s.apiAck(w, r)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	require.Equal(t, [][2]string{{"cam1", testSirenSrc}, {"cam1", ""}}, p.got())
+	got, ok := s.get(e.ID)
+	require.True(t, ok)
+	require.Equal(t, sirenStopped, got.Siren)
+	require.NotNil(t, got.AcknowledgedAt)
 }
 
 func TestWriteSirenWAV(t *testing.T) {
