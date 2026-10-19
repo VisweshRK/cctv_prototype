@@ -79,6 +79,46 @@ cam1:
 The zone helper `ai/cctv_ai/zones.py` is written by P3 + P4 as a small shared-code PR reviewed by
 Viswesh, because intrusion, restricted area, occupancy and power_when_absent all use it.
 
+### Event fields the dashboard uses
+
+The dashboard (`www/cctv.html`) reads these optional keys from an event's `data`. All are optional;
+send them when you have them.
+
+| Field | What it is | Example |
+| --- | --- | --- |
+| `data.area` | A human name for the place. Shown as the popup's area (falls back to `data.zone`, then "Whole view"). | `"Server room door"` |
+| `data.box` | `[x1, y1, x2, y2]` as **0..1 fractions** of the frame, drawn on the snapshot. Leave it out if the image already has boxes drawn. | `[0.31, 0.22, 0.58, 0.94]` |
+| `data.detail` | The one-line popup subtitle. | `"1 person in zone for 6 s"` |
+
+`data.box` is in fractions, but `TrackedObject.box` above is in **pixels**: divide x by the frame
+width and y by the frame height before you send it.
+
+`POST /api/cctv/events` also takes an optional top-level `image`: a base64 JPEG of at most about
+3 MB (the server's body limit is 4 MB). It becomes the event's snapshot (served at
+`api/cctv/snapshot?id=<event id>`) and is never stored in the event itself. Without it the server
+grabs a frame from the camera. In Python, pass the frame: `Go2rtc.send_event(event, image=frame)`.
+
+```json
+{"camera": "cam1", "use_case": "intrusion", "label": "person", "confidence": 0.91,
+ "data": {"area": "Server room door", "box": [0.31, 0.22, 0.58, 0.94], "detail": "1 person in zone for 6 s"},
+ "image": "/9j/4AAQSkZJRg..."}
+```
+
+**What pops up** (`USE_CASES` and `describe()` in `www/cctv-logic.js`): every use case opens the
+centre popup, except these, which go only to the alert feed:
+
+- `occupancy` (any label);
+- `face_recognition` with label `known_face` (only unknown faces pop up);
+- `vehicle_lpr` without `data.plate` (a vehicle pops up only with a plate, as "Vehicle · <plate>");
+- `tampering` with label `camera_online` ("Camera back online").
+
+**What rings the camera siren** (`internal/cctv/cctv.go` defaults, `siren.go`): `intrusion`,
+`restricted_area` and `fire`. The siren plays on the two-way-audio speaker of **the camera that saw
+it** only, until a guard acknowledges every such alert on that camera (or for at most 3 minutes).
+The list can be changed with `cctv.siren.use_cases` in the go2rtc config.
+
+Full design: [../superpowers/specs/2026-10-19-demo-ui-design.md](../superpowers/specs/2026-10-19-demo-ui-design.md).
+
 ## Order of work
 
 | Step | Viswesh | P1 | P2 | P3 + P4 |
