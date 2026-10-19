@@ -152,9 +152,9 @@ func (s *eventStore) addWithImage(e Event, image []byte) (Event, error) {
 	s.nextID++
 	s.push(e)
 	s.persist(e)
+	s.publishLocked(message{Type: "alert", Event: e})
 	s.mu.Unlock()
 
-	s.publish(message{Type: "alert", Event: e})
 	if s.onAdd != nil {
 		s.onAdd(e, image)
 	}
@@ -174,9 +174,9 @@ func (s *eventStore) update(id int64, change func(e *Event)) (Event, bool) {
 	change(&s.events[i])
 	e := s.events[i]
 	s.persist(e)
+	s.publishLocked(message{Type: "update", Event: e})
 	s.mu.Unlock()
 
-	s.publish(message{Type: "update", Event: e})
 	return e, true
 }
 
@@ -236,12 +236,11 @@ func (s *eventStore) unsubscribe(ch chan message) {
 	}
 }
 
-// publish never blocks. It takes the lock on its own, after the change is
-// done, so a channel is never closed (by cancel or a drop) while being sent to.
-func (s *eventStore) publish(m message) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+// publishLocked sends m to every subscriber without ever blocking. Call it
+// with s.mu held, in the same critical section as the change, so subscribers
+// get messages in file order and a channel is never closed (by cancel or a
+// drop) while being sent to.
+func (s *eventStore) publishLocked(m message) {
 	for ch := range s.subs {
 		select {
 		case ch <- m:

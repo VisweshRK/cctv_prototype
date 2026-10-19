@@ -7,7 +7,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -149,6 +151,45 @@ func TestAddCallsOnAddHook(t *testing.T) {
 	_, err := s.addWithImage(Event{Camera: "c", UseCase: "u", Label: "l"}, []byte{0xFF, 0xD8})
 	require.NoError(t, err)
 	require.Equal(t, []byte{0xFF, 0xD8}, gotImage)
+}
+
+// Concurrent updates must reach subscribers in the same order as the file
+// lines, otherwise a stale whole-event message can win on the dashboard.
+func TestSubscribersSeeFileOrder(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	s := newEventStore(path, 10)
+	ch, cancel := s.subscribe()
+	e, _ := s.add(Event{Camera: "c", UseCase: "u", Label: "l"})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ { // 1 alert + 50 updates fits the 64 buffer
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			s.update(e.ID, func(e *Event) { e.Label = strconv.Itoa(i) })
+		}(i)
+	}
+	wg.Wait()
+	cancel()
+
+	var got []string
+	for m := range ch {
+		got = append(got, m.Type+":"+m.Event.Label)
+	}
+
+	b, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var want []string
+	for i, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		var fe Event
+		require.NoError(t, json.Unmarshal([]byte(line), &fe))
+		typ := "update"
+		if i == 0 {
+			typ = "alert"
+		}
+		want = append(want, typ+":"+fe.Label)
+	}
+	require.Equal(t, want, got)
 }
 
 func TestCameraUpdate(t *testing.T) {
