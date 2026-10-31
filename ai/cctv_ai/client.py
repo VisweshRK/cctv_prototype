@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from typing import Any, Optional
 
 import cv2
@@ -39,8 +40,17 @@ class Go2rtc:
         host = self.url.split("://", 1)[-1].split(":", 1)[0].split("/", 1)[0]
         return f"rtsp://{host}:{rtsp_port}/{camera}"
 
-    def send_event(self, event: Event) -> dict[str, Any]:
-        r = self.http.post(f"{self.url}/api/cctv/events", json=event.to_json(), timeout=self.timeout)
+    def send_event(self, event: Event, image: Optional[np.ndarray] = None) -> dict[str, Any]:
+        """POST the event. image (a BGR frame) becomes its snapshot; without
+        it go2rtc grabs a frame itself. Keep the JPEG under about 3 MB: the
+        server's body limit is 4 MB."""
+        body = event.to_json()
+        if image is not None:
+            ok, jpeg = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if not ok:
+                raise ValueError("cv2.imencode could not encode the image as JPEG")
+            body["image"] = base64.b64encode(jpeg.tobytes()).decode("ascii")
+        r = self.http.post(f"{self.url}/api/cctv/events", json=body, timeout=self.timeout)
         r.raise_for_status()
         return r.json()
 

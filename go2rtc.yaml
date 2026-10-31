@@ -31,7 +31,17 @@ cctv:
   offline_after: 20s           # no new data for this long = camera offline
   events_file: data/events.jsonl
   max_events: 1000             # events kept in memory for the API
+  names: {cam1: Front corridor, cam2: Main gate}   # place names shown on the dashboard
+  use_cases:                                       # shown as "configured" (edit to match the worker)
+    cam1: [intrusion, restricted_area, occupancy, fall, face_recognition, fire, baby_crying, power_when_absent, tampering]
+    cam2: [vehicle_lpr, intrusion, face_recognition, fire, tampering]
+  snapshots_dir: data/snapshots
+  siren:
+    use_cases: [intrusion, restricted_area, fire]
+    max: 3m
+    file: data/siren.wav
+    audio: pcma        # the camera's two-way audio codec: pcma, pcmu or aac
 
 log:
   level: info
-  cctv: debug
+  cctv: info
