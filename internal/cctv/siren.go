@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,8 +25,36 @@ func playOnCamera(camera, source string) error {
 	return stream.Play(source)
 }
 
+// speakerOf returns the stream whose speaker belongs to camera. A camera cut
+// out of another stream (one lens of a dual-lens camera: ffmpeg:dual#...) has
+// no speaker of its own, so it uses the speaker of the stream it comes from.
+// sources returns a stream's sources, or nil if there is no such stream.
+func speakerOf(camera string, sources func(name string) []string) string {
+	for _, src := range sources(camera) {
+		rest, ok := strings.CutPrefix(src, "ffmpeg:")
+		if !ok {
+			continue
+		}
+		name, _, _ := strings.Cut(rest, "#")
+		if name != camera && sources(name) != nil {
+			return name
+		}
+	}
+	return camera
+}
+
+// streamSources is the real sources function for speakerOf.
+func streamSources(name string) []string {
+	if stream := streams.Get(name); stream != nil {
+		return stream.Sources()
+	}
+	return nil
+}
+
 // siren rings the speaker of the camera that saw a burglary-type alert until
 // a guard acknowledges every such alert on that camera, or for at most max.
+// Cameras that share one speaker (the lenses of a dual-lens camera) share one
+// ring cycle: it stops once the alerts of all of them are acknowledged.
 //
 // play can block while dialling the camera, so it is never called with mu
 // held. Instead each camera has one "driver" at a time: whoever changes what
@@ -34,13 +63,14 @@ func playOnCamera(camera, source string) error {
 // and return; the driver picks it up.
 type siren struct {
 	play     sirenPlayer
+	speaker  func(camera string) string // nil: every camera has its own speaker
 	source   string
 	useCases map[string]bool
 	max      time.Duration
 	store    *eventStore
 
 	mu      sync.Mutex
-	cameras map[string]*sirenCamera
+	cameras map[string]*sirenCamera // by speaker
 }
 
 type sirenCamera struct {
@@ -66,6 +96,13 @@ func newSiren(play sirenPlayer, source string, useCases []string, max time.Durat
 	return s
 }
 
+func (s *siren) speakerOf(camera string) string {
+	if s.speaker == nil {
+		return camera
+	}
+	return s.speaker(camera)
+}
+
 func (s *siren) camera(name string) *sirenCamera {
 	c := s.cameras[name]
 	if c == nil {
@@ -88,7 +125,8 @@ func (s *siren) onEvent(e Event) {
 		s.mu.Unlock()
 		return
 	}
-	c := s.camera(e.Camera)
+	speaker := s.speakerOf(e.Camera)
+	c := s.camera(speaker)
 	if len(c.pending) > 0 {
 		s.dropTrimmed(c)
 		if len(c.pending) == 0 {
@@ -106,13 +144,14 @@ func (s *siren) onEvent(e Event) {
 		c.want = true
 		c.joined = append(c.joined, e.ID)
 	}
-	s.drive(e.Camera, c)
+	s.drive(speaker, c)
 }
 
 // onAck is the store's onAck hook, called once per newly acknowledged event.
 func (s *siren) onAck(e Event) {
+	speaker := s.speakerOf(e.Camera)
 	s.mu.Lock()
-	c := s.cameras[e.Camera]
+	c := s.cameras[speaker]
 	if c == nil || !c.pending[e.ID] {
 		s.mu.Unlock()
 		return // not a siren event: leave the camera alone
@@ -133,7 +172,7 @@ func (s *siren) onAck(e Event) {
 		c.rung, c.joined = nil, nil
 		c.want, c.cutOff = false, false
 	}
-	s.drive(e.Camera, c)
+	s.drive(speaker, c)
 }
 
 // timeout ends the ring cycle that started the timer with generation gen.

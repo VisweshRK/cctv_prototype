@@ -113,7 +113,7 @@ centre popup, except these, which go only to the alert feed:
 - `occupancy` (any label);
 - `face_recognition` with label `known_face` (only unknown faces pop up);
 - `vehicle_lpr` without `data.plate` (a vehicle pops up only with a plate, as "Vehicle · <plate>");
-- `tampering` with label `camera_online` ("Camera back online").
+- `tampering` with label `camera_online` ("Camera back online") or `restored` ("Camera view restored").
 
 **What rings the camera siren** (`internal/cctv/cctv.go` defaults, `siren.go`): `intrusion`,
 `restricted_area` and `fire`. The siren plays on the two-way-audio speaker of **the camera that saw
