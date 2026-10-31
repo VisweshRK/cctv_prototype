@@ -84,6 +84,7 @@ func Init() {
 	snaps := newSnapshots(cfg.Mod.SnapshotsDir, grabFrame, events)
 	source := "ffmpeg:" + sc.File + "#input=loop#audio=" + sc.Audio
 	sir := newSiren(playOnCamera, source, sc.UseCases, sc.Max, events)
+	sir.speaker = func(camera string) string { return speakerOf(camera, streamSources) }
 	events.onAdd = func(e Event, image []byte) {
 		snaps.handle(e, image) // returns at once
 		sir.onEvent(e)

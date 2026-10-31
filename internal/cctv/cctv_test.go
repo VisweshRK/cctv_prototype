@@ -772,6 +772,39 @@ func TestSirenOnlyOnCameraThatSawIt(t *testing.T) {
 	require.Equal(t, [][2]string{{"cam2", testSirenSrc}}, p.got())
 }
 
+func TestSpeakerOf(t *testing.T) {
+	streams := map[string][]string{
+		"dual": {"onvif://admin:x@192.168.1.10:8899"},
+		"cam1": {"ffmpeg:dual#video=h264#raw=-vf crop=iw:ih/2:0:0"},
+		"cam2": {"rtsp://192.168.1.11/stream1"},
+		"cam3": {"ffmpeg:samples/test.mp4#input=loop#video=copy"}, // a file, not a stream
+		"cam4": {"ffmpeg:cam4#video=h264"},
+	}
+	sources := func(name string) []string { return streams[name] }
+	require.Equal(t, "dual", speakerOf("cam1", sources))
+	require.Equal(t, "cam2", speakerOf("cam2", sources))
+	require.Equal(t, "cam3", speakerOf("cam3", sources))
+	require.Equal(t, "cam4", speakerOf("cam4", sources))
+	require.Equal(t, "nope", speakerOf("nope", sources))
+}
+
+func TestSirenSharedSpeaker(t *testing.T) {
+	p := &fakePlayer{}
+	s, sir := newTestSiren(p)
+	sir.speaker = func(string) string { return "dual" } // two lenses, one speaker
+
+	e1 := addAlert(t, s, "cam1", "intrusion")
+	e2 := addAlert(t, s, "cam2", "intrusion")
+	require.Equal(t, [][2]string{{"dual", testSirenSrc}}, p.got())
+	require.Equal(t, sirenRinging, sirenOf(t, s, e2.ID))
+
+	ackAlert(t, s, sir, e1.ID)
+	require.Len(t, p.got(), 1) // the other lens's alert keeps it ringing
+
+	ackAlert(t, s, sir, e2.ID)
+	require.Equal(t, [][2]string{{"dual", testSirenSrc}, {"dual", ""}}, p.got())
+}
+
 func TestSirenCutOffAndStaysQuiet(t *testing.T) {
 	p := &fakePlayer{}
 	s, sir := newTestSiren(p)

@@ -19,6 +19,9 @@ streams:
   # Q-Tech Wi-Fi cameras (two-way audio). Fill CAM1_URL / CAM2_URL in .env.
   cam1: ${CAM1_URL}
   cam2: ${CAM2_URL}
+  # Optional: a dual-lens camera sends both lenses in one picture, one above the other.
+  # Set DUAL_URL in .env and make cam1 / cam2 its top and bottom half (see .env.example).
+  dual: ${DUAL_URL:}
 
 ffmpeg:
   # Input template for using a video file as a fake camera (loops forever).
