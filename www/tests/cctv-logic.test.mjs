@@ -49,6 +49,10 @@ test('describe: tampering labels', () => {
         {severity: 'high', title: 'Camera tampering / offline', popup: true, siren: false});
     assert.deepEqual(describe(ev({use_case: 'tampering', label: 'camera_online'})),
         {severity: 'info', title: 'Camera back online', popup: false, siren: false});
+    assert.deepEqual(describe(ev({use_case: 'tampering', label: 'covered'})),
+        {severity: 'high', title: 'Camera tampering / offline', popup: true, siren: false});
+    assert.deepEqual(describe(ev({use_case: 'tampering', label: 'restored'})),
+        {severity: 'info', title: 'Camera view restored', popup: false, siren: false});
 });
 
 test('describe: known and unknown faces', () => {

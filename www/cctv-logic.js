@@ -49,6 +49,8 @@ export function describe(e) {
         case 'tampering':
             if (e.label === 'camera_online') {
                 over = {severity: 'info', title: 'Camera back online', popup: false, siren: false};
+            } else if (e.label === 'restored') {
+                over = {severity: 'info', title: 'Camera view restored', popup: false, siren: false};
             }
             break;
         case 'face_recognition':
