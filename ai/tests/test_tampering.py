@@ -5,6 +5,8 @@ The camera view is a synthetic scene (seeded random shapes), so no footage is ne
 - blurred:  a heavy Gaussian blur of the normal view
 - moved:    a crop of the same scene shifted sideways, or a different scene
 - day/night: the same view turned grey-scale (the camera switching to IR)
+- person:   a large smooth blob (plain clothes) in front of the lens, moving fast
+- shaking:  the view jumping back and forth with motion blur (the camera being handled)
 """
 
 from __future__ import annotations
@@ -59,6 +61,22 @@ def blurred() -> np.ndarray:
     return cv2.GaussianBlur(view(), (0, 0), 6)
 
 
+def person(x: int, frame=None) -> np.ndarray:
+    """Someone close to the lens: a plain, soft shape over ~45% of the view, left edge at x."""
+    frame = view() if frame is None else frame.copy()
+    body = np.zeros((H, W), np.uint8)
+    cv2.ellipse(body, (x + 150, H // 2 + 40), (150, 230), 0, 0, 360, 255, -1)
+    cv2.circle(body, (x + 150, 60), 60, 255, -1)
+    alpha = cv2.GaussianBlur(body, (0, 0), 8).astype(np.float32)[..., None] / 255
+    shirt = np.full_like(frame, (70, 90, 120)) + NOISE.integers(-4, 5, frame.shape).astype(np.uint8)
+    return (frame * (1 - alpha) + shirt * alpha).astype(np.uint8)
+
+
+def shaken(dx: int) -> np.ndarray:
+    """The camera moving while the frame is taken: shifted and smeared sideways."""
+    return cv2.blur(view(dx=dx), (15, 1))
+
+
 def clock(frame: np.ndarray) -> np.ndarray:
     """The date and time a real camera burns onto every frame, even when the lens is covered."""
     frame = frame.copy()
@@ -77,17 +95,18 @@ def grey(frame: np.ndarray, gain: float = 0.8) -> np.ndarray:
 class TamperingTest(unittest.TestCase):
     def setUp(self):
         self.plugin = discover()["tampering"]()
-        self.plugin.learn_checks = 5  # 60 in production; short so the tests are quick
+        self.plugin.learn_checks = 5  # 120 in production; short so the tests are quick
         self.plugin.relearn_checks = 5
+        self.plugin.accept_checks = 8
         self.plugin.setup(["cam1", "cam2"])
         self.ts = datetime(2026, 10, 31, 12, 0, tzinfo=timezone.utc)
 
     def feed(self, frames, camera: str = "cam1"):
-        """One check per frame, one second apart. Returns all events."""
+        """One check per frame, one interval apart. Returns all events."""
         events = []
         for frame in frames:
             events += self.plugin.on_frame(camera, frame, self.ts)
-            self.ts += timedelta(seconds=1)
+            self.ts += timedelta(seconds=self.plugin.interval)
         return events
 
     def learn(self, camera: str = "cam1", make=view):
@@ -115,7 +134,7 @@ class TamperingTest(unittest.TestCase):
 
     def test_covered_black(self):
         self.learn()
-        self.assertEqual(self.feed([black(), black()]), [])  # 2 checks: not yet
+        self.assertEqual(self.feed([black()]), [])  # 1 check: not yet
         events = self.feed([black()])
         self.assertEqual(self.labels(events), ["covered"])
         e = events[0]
@@ -128,12 +147,12 @@ class TamperingTest(unittest.TestCase):
 
     def test_covered_flat_colour(self):
         self.learn()
-        self.assertEqual(self.labels(self.feed([flat() for _ in range(3)])), ["covered"])
+        self.assertEqual(self.labels(self.feed([flat() for _ in range(2)])), ["covered"])
 
     def test_restored_once(self):
         self.learn()
         self.feed([black() for _ in range(5)])
-        self.assertEqual(self.feed([view(), view()]), [])  # must stay normal for 3 checks
+        self.assertEqual(self.feed([view()]), [])  # must stay normal for 2 checks
         events = self.feed([view()])
         self.assertEqual(self.labels(events), ["restored"])
         self.assertEqual(events[0].data["was"], "covered")
@@ -142,9 +161,9 @@ class TamperingTest(unittest.TestCase):
         self.assertEqual(self.labels(self.feed([black() for _ in range(3)])), ["covered"])
 
     def test_short_glitch_is_ignored(self):
-        """Headlights, a bird, a passing hand: fewer than 3 checks in a row."""
+        """Headlights, a bird, a passing hand: fewer than 2 checks in a row."""
         self.learn()
-        frames = [black(), black(), view(), flat(), view(), blurred(), blurred(), view()]
+        frames = [black(), view(), flat(), view(), blurred(), view(), view(dx=160), view()]
         self.assertEqual(self.feed(frames), [])
 
     def test_blurred(self):
@@ -179,6 +198,70 @@ class TamperingTest(unittest.TestCase):
         events = self.feed([view(world=OTHER_WORLD) for _ in range(3)])
         self.assertEqual(self.labels(events), ["moved"])
         self.assertEqual(self.labels(self.feed([view() for _ in range(3)])), ["restored"])
+
+    def test_worse_problem_during_moved(self):
+        """Turned away, then covered: the cover is still reported."""
+        self.learn()
+        other = lambda: view(world=OTHER_WORLD)
+        self.assertEqual(self.labels(self.feed([other() for _ in range(3)])), ["moved"])
+        self.assertEqual(self.labels(self.feed([black() for _ in range(3)])), ["covered"])
+        # uncovered but still turned away: not a new event (less serious than covered)
+        self.assertEqual(self.feed([other(), other()]), [])
+        events = self.feed([view(), view()])
+        self.assertEqual(self.labels(events), ["restored"])
+        self.assertEqual(events[0].data["was"], "covered")
+
+    def test_lesser_problem_during_covered_is_quiet(self):
+        self.learn()
+        self.assertEqual(self.labels(self.feed([black() for _ in range(3)])), ["covered"])
+        self.assertEqual(self.feed([blurred(), blurred(), view(dx=160), view(dx=160)]), [])
+
+    def test_new_position_accepted(self):
+        """Left moved for accept_checks: the new view becomes normal and tampering is caught again."""
+        self.learn()
+        turned = lambda: view(world=OTHER_WORLD)
+        # 3 checks: the first one after the jump waits for the picture to settle
+        self.assertEqual(self.labels(self.feed([turned() for _ in range(3)])), ["moved"])
+        events = self.feed([turned() for _ in range(self.plugin.accept_checks)])
+        self.assertEqual(self.labels(events), ["restored"])
+        self.assertTrue(events[0].data["accepted"])
+        self.assertEqual(self.feed([turned() for _ in range(self.plugin.relearn_checks + 10)]), [])
+        self.assertEqual(self.labels(self.feed([black() for _ in range(2)])), ["covered"])
+        self.feed([turned() for _ in range(2)])
+        # and the old view now counts as moved
+        self.assertEqual(self.labels(self.feed([view() for _ in range(3)])), ["moved"])
+
+    def test_person_moving_fast_is_not_tampering(self):
+        """Someone walking quickly past, close to the lens, hides half the view and changes a lot
+        between checks, but the background they don't hide stays where it was."""
+        self.learn()
+        walk = [person(x) for x in range(-250, W, 60)]
+        self.assertEqual(self.feed(walk + walk[::-1] + walk), [])
+        # and standing or sitting still close to the lens
+        self.assertEqual(self.feed([person(100) for _ in range(20)]), [])
+        self.assertEqual(self.feed([view() for _ in range(3)]), [])
+        # tampering behind the person is still caught
+        self.assertEqual(self.labels(self.feed([black() for _ in range(3)])), ["covered"])
+
+    def test_shaking(self):
+        """Handled or being taken off the wall: the picture jumps between checks."""
+        self.learn()
+        events = self.feed([shaken(dx) for dx in (30, -30, 30, -30)])
+        self.assertEqual(self.labels(events), ["shaking"])
+        self.assertIn("jump", events[0].data)
+        # it ends up pointing somewhere else: that is worse, so it gets its own event
+        self.assertEqual(self.labels(self.feed([view(dx=160) for _ in range(4)])), ["moved"])
+        self.assertEqual(self.labels(self.feed([view() for _ in range(3)])), ["restored"])
+
+    def test_shaken_then_put_back(self):
+        self.learn()
+        self.assertEqual(self.labels(self.feed([shaken(dx) for dx in (30, -30, 30, -30)])), ["shaking"])
+        self.assertEqual(self.labels(self.feed([view() for _ in range(3)])), ["restored"])
+
+    def test_single_bump_is_ignored(self):
+        """A door slam or a knock: one shaken check, then the view is where it was."""
+        self.learn()
+        self.assertEqual(self.feed([view(), shaken(30), view(), view(), shaken(-30), view()]), [])
 
     def test_day_night_switch_is_not_tampering(self):
         self.learn()

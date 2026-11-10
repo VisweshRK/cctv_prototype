@@ -4,7 +4,7 @@
 import './video-stream.js';
 import {
     USE_CASES, describe, areaOf, detailOf, boxOf, snapshotState, snapshotSrc, sirenText, Incidents, queueList,
-    summarize, simulated, timelineHours, barFractions, parseTime,
+    summarize, simulated, timelineHours, barFractions, parseTime, occupancyNow, energyWaste, TARIFF,
 } from './cctv-logic.js';
 
 const STATUS_EVERY = 5000; // ms between GET api/cctv/status
@@ -187,6 +187,7 @@ function renderStatus(list) {
     setOnlineChip(online, seen.size);
     $('armed').replaceChildren(el('b', '', useCases.size), ' use cases configured');
     syncAlarm(); // a tile made just now may belong to the open incident
+    if (analyticsLoaded) renderAnalytics(); // the boxes name cameras by their place
 }
 
 async function refreshStatus() {
@@ -468,6 +469,7 @@ function onPush(type, e) {
         return;
     }
     if (type === 'alert') {
+        analyticsAdd(e);
         feedAdd(e);
         const before = incidents.groupOf(e.id);
         incidents.add(e);
@@ -839,6 +841,103 @@ async function simulate() {
 }
 
 // ---------------------------------------------------------------------------
+// Zone occupancy and energy wasted (boxes under the cameras)
+// ---------------------------------------------------------------------------
+
+const ANALYTICS = ['occupancy', 'power_when_absent'];
+const ANALYTICS_EVERY = 30000; // ms between reloads; pushes update the boxes in between
+const tariff = Number(params.get('tariff')) > 0 ? Number(params.get('tariff')) : TARIFF; // ₹/kWh, ?tariff=9.5
+/** use case -> (id -> event). Loaded on their own: the feed's last 50 events can push them out. */
+const analytics = new Map(ANALYTICS.map((uc) => [uc, new Map()]));
+let analyticsLoaded = false;
+
+const rupees = (n) => '₹' + n.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const kwhText = (n) => `${n.toLocaleString('en-IN', {maximumFractionDigits: 2})} kWh`;
+const cameraLabel = (camera) => {
+    const place = placeOf(camera);
+    return place ? `${camera} · ${place}` : camera;
+};
+
+async function loadAnalytics() {
+    const lists = await Promise.all(ANALYTICS.map(async (uc) => {
+        try {
+            const r = await fetch(`api/cctv/events?use_case=${uc}&limit=100`, {cache: 'no-cache', signal: AbortSignal.timeout(FETCH_TIMEOUT)});
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const list = await r.json();
+            if (!Array.isArray(list)) throw new Error('events is not a list');
+            return list.filter(isEvent);
+        } catch (err) {
+            console.warn(`[cctv] ${uc} events unavailable:`, err);
+            return null; // keep what we have
+        }
+    }));
+    ANALYTICS.forEach((uc, i) => {
+        if (lists[i] === null) return;
+        const m = analytics.get(uc);
+        for (const e of lists[i]) m.set(e.id, e);
+    });
+    analyticsLoaded = true;
+    renderAnalytics();
+}
+
+function analyticsAdd(e) {
+    if (!analytics.has(e.use_case)) return;
+    analytics.get(e.use_case).set(e.id, e);
+    if (analyticsLoaded) renderAnalytics();
+}
+
+/** One line of a box: name, a bar (share of the largest), the number. */
+function anaRow(name, sub, fraction, value, title) {
+    const row = el('div', 'row');
+    const n = el('span', 'n');
+    n.append(el('b', '', name));
+    if (sub) n.append(` · ${sub}`);
+    const bar = el('span', 'bar');
+    const fill = el('i');
+    fill.style.width = `${Math.round(Math.min(1, Math.max(0, fraction)) * 100)}%`;
+    bar.appendChild(fill);
+    row.append(n, bar, el('span', 'x mono', value));
+    if (title) row.title = title;
+    return row;
+}
+
+function renderAnalytics() {
+    const occ = occupancyNow([...analytics.get('occupancy').values()]);
+    const occTotal = $('occ-total');
+    occTotal.classList.toggle('waiting', occ === null);
+    if (occ === null) {
+        occTotal.textContent = 'waiting for occupancy detector';
+        $('occ-rows').replaceChildren(el('div', 'none', 'Counts show here once the occupancy use case sends events'));
+    } else {
+        occTotal.textContent = `${occ.total} ${occ.total === 1 ? 'person' : 'people'}`;
+        const max = Math.max(1, ...occ.zones.map((z) => z.count));
+        $('occ-rows').replaceChildren(...occ.zones.map((z) => anaRow(
+            z.zone || cameraLabel(z.camera), z.zone ? z.camera : '', z.count / max, String(z.count),
+            `Since ${hms(z.time)}`)));
+    }
+
+    const w = energyWaste([...analytics.get('power_when_absent').values()], new Date(), tariff);
+    const total = $('energy-total');
+    total.classList.toggle('waiting', w === null);
+    if (w === null) {
+        total.textContent = 'waiting for power detector';
+        $('energy-note').textContent = '';
+        $('energy-rows').replaceChildren(el('div', 'none', 'Costs show here once the power-when-absent use case sends events'));
+        return;
+    }
+    total.textContent = rupees(w.rupees);
+    $('energy-note').textContent = `${kwhText(w.kwh)} · ${w.times} time${w.times === 1 ? '' : 's'} · at ${rupees(tariff)}/kWh`;
+    if (w.cameras.length === 0) {
+        $('energy-rows').replaceChildren(el('div', 'none', 'Nothing left on in an empty room today'));
+        return;
+    }
+    const max = Math.max(...w.cameras.map((c) => c.rupees));
+    $('energy-rows').replaceChildren(...w.cameras.map((c) => anaRow(
+        cameraLabel(c.camera), '', max > 0 ? c.rupees / max : 0, rupees(c.rupees),
+        `${kwhText(c.kwh)} · ${c.times} time${c.times === 1 ? '' : 's'}`)));
+}
+
+// ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
 
@@ -851,3 +950,5 @@ setInterval(renderNumbers, NUMBERS_EVERY); // the only numbers timer; event chan
 pollStatus();
 connect(); // its open event loads the alert list
 loadFeed();
+loadAnalytics();
+setInterval(loadAnalytics, ANALYTICS_EVERY); // also moves "today" on past midnight
