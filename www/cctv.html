@@ -665,22 +665,113 @@
             grid-column: 1 / -1;
         }
 
-        .kpi, .tl, .pipe {
+        .ana {
+            grid-column: span 2;
+        }
+
+        .kpi, .tl, .pipe, .ana {
             background: var(--panel);
             border: 1px solid var(--line);
             border-radius: 14px;
             padding: 13px 15px;
         }
 
-        .kpi .l, .tl .l, .pipe .l {
+        .kpi .l, .tl .l, .pipe .l, .ana .l {
             color: var(--muted);
             font-size: 11.5px;
         }
 
-        .tl .l, .pipe .l {
+        .tl .l, .pipe .l, .ana .l {
             display: flex;
             justify-content: space-between;
             gap: 12px;
+        }
+
+        /* zone occupancy, power wasted in unoccupied rooms */
+        .ana .big {
+            display: flex;
+            align-items: baseline;
+            flex-wrap: wrap;
+            gap: 4px 10px;
+            margin-top: 4px;
+        }
+
+        .ana .big .v {
+            font-size: 26px;
+            font-weight: 700;
+            letter-spacing: -.5px;
+        }
+
+        .ana .big .v.waiting {
+            font-size: 14px;
+            font-weight: 500;
+            letter-spacing: 0;
+            line-height: 31px;
+        }
+
+        .ana .big .d {
+            font-size: 11px;
+            color: var(--muted);
+        }
+
+        .ana .rows {
+            display: flex;
+            flex-direction: column;
+            gap: 7px;
+            margin-top: 10px;
+        }
+
+        .ana .row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 90px auto;
+            align-items: center;
+            gap: 10px;
+            font-size: 12px;
+        }
+
+        .ana .row .n {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: var(--muted);
+        }
+
+        .ana .row .n b {
+            color: var(--text);
+            font-weight: 600;
+        }
+
+        .ana .row .bar {
+            height: 6px;
+            border-radius: 3px;
+            background: var(--panel2);
+            overflow: hidden;
+        }
+
+        .ana .row .bar i {
+            display: block;
+            height: 100%;
+            border-radius: 3px;
+            background: var(--c);
+        }
+
+        .ana .row .x {
+            font-weight: 600;
+            text-align: right;
+            min-width: 54px;
+        }
+
+        .ana .rows .none {
+            color: var(--dim);
+            font-size: 11.5px;
+        }
+
+        #occupancy {
+            --c: var(--accent);
+        }
+
+        #energy {
+            --c: var(--high);
         }
 
         .kpi .v {
@@ -1203,6 +1294,24 @@
         <div class="cams" id="cams"></div>
 
         <div class="bottom">
+            <div class="ana" id="occupancy">
+                <div class="l"><span>Zone occupancy</span><span>people in view now</span></div>
+                <div class="big"><span class="v waiting" id="occ-total">waiting for occupancy detector</span></div>
+                <div class="rows" id="occ-rows"></div>
+            </div>
+            <div class="ana" id="energy">
+                <div class="l"><span>Power wasted in unoccupied rooms</span><span>power on, nobody here</span></div>
+                <div class="big"><span class="v waiting" id="energy-total">waiting for power detector</span><span class="d" id="energy-note"></span></div>
+                <div class="rows" id="energy-rows"></div>
+            </div>
+
+            <div class="tl">
+                <div class="l"><span>Last 12 hours</span><span>popup alerts per hour</span></div>
+                <div class="track" id="timeline"></div>
+                <div class="ticks" id="timeline-ticks"></div>
+                <div class="ucs" id="timeline-uc"></div>
+            </div>
+
             <div class="kpi">
                 <div class="l">Alerts today</div>
                 <div class="v" id="kpi-alerts">–</div>
@@ -1222,13 +1331,6 @@
                 <div class="l">Avg. alert time</div>
                 <div class="v waiting" id="kpi-latency">waiting for AI worker</div>
                 <div class="d">incident → screen</div>
-            </div>
-
-            <div class="tl">
-                <div class="l"><span>Last 12 hours</span><span>popup alerts per hour</span></div>
-                <div class="track" id="timeline"></div>
-                <div class="ticks" id="timeline-ticks"></div>
-                <div class="ucs" id="timeline-uc"></div>
             </div>
 
             <div class="pipe waiting" id="pipeline">

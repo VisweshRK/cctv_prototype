@@ -6,6 +6,7 @@ import {spawnSync} from 'node:child_process';
 import {
     USE_CASES, describe, areaOf, detailOf, boxOf, esc, snapshotState, snapshotSrc, sirenText,
     Incidents, queueList, summarize, simulated, timelineHours, barFractions, parseTime,
+    occupancyNow, energyWaste, TARIFF,
 } from '../cctv-logic.js';
 
 const ev = (fields) => ({
@@ -515,4 +516,50 @@ test('simulated: picks a camera configured for the use case', () => {
     // no use cases known (status not loaded yet, or bad entries): round-robin by name
     assert.equal(simulated(1, [{name: 'cam1'}, {name: 'cam2', use_cases: 'x'}]).camera, 'cam2');
     assert.equal(simulated(1, [null, {name: ''}, {name: 'cam3', use_cases: []}]).camera, 'cam3');
+});
+
+test('occupancyNow: newest count per camera and zone', () => {
+    const occ = (fields, data) => ev({use_case: 'occupancy', label: 'occupancy', ...fields, data});
+    const events = [
+        occ({id: 5, camera: 'cam2'}, {count: 1}),
+        occ({id: 3, camera: 'cam1', time: '2026-10-19T10:03:00Z'}, {count: 4, zone: 'Desk'}),
+        occ({id: 1, camera: 'cam1'}, {count: 2, zone: 'Desk'}), // older than id 3
+        occ({id: 4, camera: 'cam1'}, {count: 0}),
+        occ({id: 6, camera: 'cam1'}, {count: 'many'}), // not a number: skipped
+        ev({id: 7, camera: 'cam1'}), // not occupancy
+    ];
+    assert.deepEqual(occupancyNow(events), {
+        zones: [
+            {camera: 'cam1', zone: '', count: 0, time: '2026-10-19T10:00:00Z'},
+            {camera: 'cam1', zone: 'Desk', count: 4, time: '2026-10-19T10:03:00Z'},
+            {camera: 'cam2', zone: '', count: 1, time: '2026-10-19T10:00:00Z'},
+        ],
+        total: 5,
+    });
+    assert.equal(occupancyNow([ev({})]), null);
+    assert.equal(occupancyNow([]), null);
+});
+
+test('energyWaste: today only, kWh to rupees, per camera', () => {
+    const now = new Date(2026, 9, 19, 14, 45, 0);
+    const at = (ms) => new Date(ms).toISOString();
+    const pwr = (fields, data) => ev({use_case: 'power_when_absent', label: 'power_on_empty_room', ...fields, data});
+    const events = [
+        pwr({id: 1, camera: 'cam1', time: at(now - 3600000)}, {kwh: 0.5}),
+        pwr({id: 2, camera: 'cam2', time: at(now - 7200000)}, {watts: 120, minutes: 30}), // 0.06 kWh
+        pwr({id: 3, camera: 'cam2', time: at(now - 60000)}, {}), // no numbers: counted, 0 kWh
+        pwr({id: 4, camera: 'cam1', time: at(new Date(2026, 9, 18, 23, 0, 0).getTime())}, {kwh: 9}), // yesterday
+        ev({id: 5, time: at(now - 60000), data: {kwh: 9}}), // not power_when_absent
+    ];
+    const w = energyWaste(events, now);
+    assert.equal(w.times, 3);
+    assert.ok(Math.abs(w.kwh - 0.56) < 1e-9);
+    assert.ok(Math.abs(w.rupees - 0.56 * TARIFF) < 1e-9);
+    assert.deepEqual(w.cameras.map((c) => [c.camera, c.times]), [['cam1', 1], ['cam2', 2]]);
+    assert.ok(Math.abs(w.cameras[1].rupees - 0.06 * TARIFF) < 1e-9);
+
+    assert.equal(energyWaste(events, now, 10).rupees.toFixed(2), '5.60');
+    // only yesterday's events: the detector runs, nothing wasted today
+    assert.deepEqual(energyWaste([events[3]], now), {kwh: 0, rupees: 0, times: 0, cameras: []});
+    assert.equal(energyWaste([ev({})], now), null);
 });

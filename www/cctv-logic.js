@@ -303,6 +303,75 @@ export function barFractions(counts) {
     return counts.map((c) => (max > 0 && c > 0 ? c / max : 0));
 }
 
+// ₹ per kWh for "energy wasted". A typical Indian commercial tariff; pass another to energyWaste().
+export const TARIFF = 8;
+
+const byCameraZone = (a, b) => a.camera.localeCompare(b.camera) || a.zone.localeCompare(b.zone);
+
+/**
+ * People in each zone now: the newest occupancy event of each camera and
+ * data.zone ('' = the whole view), with its data.count. null when there is no
+ * occupancy event at all (the detector isn't running).
+ * @returns {{zones: {camera: string, zone: string, count: number, time: string}[], total: number}|null}
+ */
+export function occupancyNow(events) {
+    const latest = new Map();
+    for (const e of events) {
+        if (e.use_case !== 'occupancy') continue;
+        const d = dataOf(e);
+        const count = Number(d.count);
+        if (!Number.isFinite(count) || count < 0) continue;
+        const zone = nonEmpty(d.zone) ? d.zone : '';
+        const key = JSON.stringify([e.camera, zone]);
+        const prev = latest.get(key);
+        if (prev && prev.id > e.id) continue; // ids grow with time
+        latest.set(key, {id: e.id, camera: e.camera, zone, count: Math.round(count), time: e.time});
+    }
+    if (latest.size === 0) return null;
+    const zones = [...latest.values()].sort(byCameraZone).map(({id, ...z}) => z);
+    return {zones, total: zones.reduce((a, z) => a + z.count, 0)};
+}
+
+// kWh of one power_when_absent event: data.kwh, or data.watts for data.minutes. 0 if neither.
+function kwhOf(d) {
+    const kwh = Number(d.kwh);
+    if (Number.isFinite(kwh) && kwh >= 0) return kwh;
+    const watts = Number(d.watts);
+    const minutes = Number(d.minutes);
+    if (Number.isFinite(watts) && Number.isFinite(minutes) && watts >= 0 && minutes >= 0) return watts * minutes / 60000;
+    return 0;
+}
+
+/**
+ * Power used today (now's local date) while nobody was there, from
+ * power_when_absent events, in kWh and ₹, in total and per camera. null when
+ * there is no power_when_absent event at all (the detector isn't running).
+ * @param {Date|number} now
+ * @returns {{kwh: number, rupees: number, times: number, cameras: {camera: string, kwh: number, rupees: number, times: number}[]}|null}
+ */
+export function energyWaste(events, now, tariff = TARIFF) {
+    const n = new Date(now);
+    let seen = false;
+    const cams = new Map();
+    for (const e of events) {
+        if (e.use_case !== 'power_when_absent') continue;
+        seen = true;
+        const t = parseTime(e.time);
+        if (Number.isNaN(t) || t > n.getTime()) continue;
+        const d = new Date(t);
+        if (d.getFullYear() !== n.getFullYear() || d.getMonth() !== n.getMonth() || d.getDate() !== n.getDate()) continue;
+        const c = cams.get(e.camera) || {camera: e.camera, kwh: 0, rupees: 0, times: 0};
+        c.kwh += kwhOf(dataOf(e));
+        c.times++;
+        cams.set(e.camera, c);
+    }
+    if (!seen) return null;
+    const cameras = [...cams.values()].sort((a, b) => b.kwh - a.kwh || a.camera.localeCompare(b.camera));
+    for (const c of cameras) c.rupees = c.kwh * tariff;
+    const kwh = cameras.reduce((a, c) => a + c.kwh, 0);
+    return {kwh, rupees: kwh * tariff, times: cameras.reduce((a, c) => a + c.times, 0), cameras};
+}
+
 // What "Simulate alert" cycles through: one popup event per use case.
 const CYCLE = [
     {use_case: 'intrusion', label: 'person', confidence: 0.91,
