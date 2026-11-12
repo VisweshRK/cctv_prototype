@@ -1,29 +1,37 @@
 # Slot: Occupancy counting
 
-**Status:** not built yet. Take it by opening a branch `usecase/occupancy` (see `CONTRIBUTING.md`).
+**Status:** Completed (`enabled = True`).
+**Owner:** Kishore
 
 ## Goal
-Count how many people are in each camera's view (or zone) and report when the count changes.
+Count how many confirmed people are in each camera's view (or zone) right now, including stationary people. Report when the count changes, when capacity is breached, and emit periodic summaries.
 
-## Events to send
-`use_case: "occupancy"`, labels: `occupancy` (count in `data.count`)
+## Events Emitted
+1. **`occupancy`** (count changed):
+   - `label: "occupancy"`
+   - `confidence: 1.0`
+   - `data: {"zone": "room", "count": 3, "previous_count": 2, "change": "count_changed"}`
+2. **`over_capacity`**:
+   - `label: "over_capacity"`
+   - `data: {"zone": "room", "count": 5, "capacity_limit": 4}`
+   - Fires once on capacity breach; re-arms only when count drops to or below the limit.
+3. **`summary`**:
+   - Emitted every 5 minutes (`300.0` seconds) per zone for timeseries graphing and dashboards.
 
-## What to copy from Frigate
-- `frigate/camera/activity_manager.py`: keeps per-camera and per-zone object counts and only publishes when they change.
+## Architecture & Frigate Influences
+- **Shared Tracker Integration**: Consumes confirmed `TrackedObject` streams from the shared pipeline (`on_objects()`). Only counts `true_positive == True` persons.
+- **Stationary People Support**: Sitting individuals are tracked as stationary objects and remain counted.
+- **Zone Filtering**: Evaluates zone membership via `ZoneTracker` (ground-contact `feet()` point-in-polygon with 3-observation inertia).
+- **Anti-Flicker Debounce**: Independent 3-second stability debounce window. Transient dropouts (e.g. 1-2 seconds behind a pillar) do not cause count fluctuations.
+- **Power When Absent Integration**: Exposes `get_count(camera, zone)` directly so `power_when_absent` queries state without relying on asynchronous message queues.
 
-## Suggested approach
-1. Reuse the person detector from `intrusion`.
-2. Smooth the count (e.g. the most common value over the last 5 checks) so it doesn't flicker.
-3. Send an event only when the smoothed count changes. `power_when_absent` uses these events to know if a room is empty.
+## Testing
+```bash
+cd ai
+python -m unittest tests/test_occupancy.py -v
+```
 
-## Where your code goes
-- `__init__.py`: fill in `setup()` (load models once) and `on_frame()`.
-- Put helper code in this folder. Model files (`*.onnx`, `*.pt`, `*.tflite`) are git-ignored, so add a
-  `download_models.py` or link in this README instead of committing them.
-- Add a test in `ai/tests/test_occupancy.py` with a sample image/sound (small files only).
-- Set `enabled = True` when it works.
-
-## Try it
+## Running
 ```bash
 cd ai
 python -m cctv_ai.worker --plugins occupancy -v
