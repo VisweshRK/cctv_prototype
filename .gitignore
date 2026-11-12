@@ -36,3 +36,10 @@ ai/.venv/
 *.onnx
 *.pt
 *.tflite
+
+# Personal local testing inspector tool (isolated from repo frontend)
+ai/tools/
+*.jpg
+serve.py
+ai/test_*.py
+ai/cctv_ai/roboflow_detector.py

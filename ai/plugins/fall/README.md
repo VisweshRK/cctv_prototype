@@ -1,30 +1,47 @@
 # Slot: Fall detection
 
-**Status:** not built yet. Take it by opening a branch `usecase/fall` (see `CONTRIBUTING.md`).
+**Status:** Completed (`enabled = True`).
+**Owner:** Kishore
 
 ## Goal
-Detect a person falling and staying on the floor (elderly care).
+Detect a person falling and remaining on the floor, distinguishing falls from normal actions like sitting down quickly or bending down, and suppressing alerts when lying intentionally on a bed or sofa.
 
-## Events to send
-`use_case: "fall"`, labels: `fall`
+## Architecture: Two-Tier Cascade
+1. **Tier 1 — Cheap Signal Screening (Every Frame @ 5 FPS, 0 ms model overhead)**:
+   - Evaluates `TrackedObject.history`.
+   - Checks aspect ratio: $w / h > 1.2$ (horizontal) vs $< 0.7$ (upright).
+   - Checks downward velocity: top of bounding box drops by $> 40\%$ of standing height within $\le 1.0\text{ s}$.
+   - Suspicious tracks are escalated to Tier 2. Normal upright tracks bypass pose inference completely, saving CPU.
+2. **Tier 2 — Pose Estimation (Only on Suspicious Person Crops)**:
+   - Uses Apache 2.0 MoveNet Lightning ONNX / RTMPose via `onnxruntime`.
+   - **No AGPL YOLO-pose.**
+   - Calculates torso angle from vertical: $\theta = \arctan2(\Delta x, \Delta y)$. An angle $> 60^\circ$ indicates a horizontal torso.
+   - Evaluates head height relative to hips.
+3. **State Machine & Persistence**:
+   - `fallen` requires persistent down posture for $\ge 3.0\text{ s}$.
+   - **Recovery**: If the person stands back up within 3.0 seconds (e.g. bending or quick recovery), the timer aborts and no event is emitted.
+   - **Bed / Sofa Furniture Exclusion**: Checks `ai/zones.yaml` for zones with `exclude: true`. If a person's feet/box are in an exclude zone, fall alerts are suppressed.
+   - **One Event per Episode**: Latches so repeated frames do not spam alerts. Re-arms only after the person stands upright for $\ge 3.0\text{ s}$ or the track ends.
 
-## What to copy from Frigate
-- No fall detection in Frigate. Reuse its idea of running the heavy model only on `person` boxes from the tracker.
+## Events Emitted
+- `label: "fall"`
+- `data: {"object_id": "cam1-17", "seconds_down": 3.6, "torso_angle": 78.4, "confidence": 0.88}`
+- `snapshot`: frame snapshot reference if enabled.
 
-## Suggested approach
-1. Pose model on each `person` box from the shared detector, e.g. MoveNet or RTMPose in ONNX (both Apache 2.0).
-   Not YOLO-pose from Ultralytics: it is AGPL.
-2. Fall = body angle goes from upright to horizontal quickly, then the person stays down for a few seconds.
-3. Keep a short per-person history (last ~2 s of keypoints) to tell a fall from lying down slowly.
+## Models
+MoveNet SinglePose Lightning ONNX (~9 MB, Apache 2.0).
+Download script:
+```bash
+python ai/plugins/fall/download_models.py
+```
 
-## Where your code goes
-- `__init__.py`: fill in `setup()` (load models once) and `on_frame()`.
-- Put helper code in this folder. Model files (`*.onnx`, `*.pt`, `*.tflite`) are git-ignored, so add a
-  `download_models.py` or link in this README instead of committing them.
-- Add a test in `ai/tests/test_fall.py` with a sample image/sound (small files only).
-- Set `enabled = True` when it works.
+## Testing
+```bash
+cd ai
+python -m unittest tests/test_fall.py -v
+```
 
-## Try it
+## Running
 ```bash
 cd ai
 python -m cctv_ai.worker --plugins fall -v

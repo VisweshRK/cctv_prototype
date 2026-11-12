@@ -1,12 +1,12 @@
-"""The AI worker: pulls frames/audio from go2rtc, runs plugins, sends events.
+"""The AI worker: pulls frames/audio from go2rtc, runs detection/tracking,
+executes plugins (on_frame, on_objects, on_audio), and sends events.
 
 Run from the ai/ folder:
     python -m cctv_ai.worker                     # all plugins with enabled = True
-    python -m cctv_ai.worker --plugins example_motion
+    python -m cctv_ai.worker --plugins occupancy,fall
     python -m cctv_ai.worker --list              # show every slot and its state
 
-Each frame is fetched once per camera and shared by all video plugins, so
-adding plugins doesn't multiply the load on the cameras.
+Each frame is fetched once per camera and shared across plugins.
 """
 
 from __future__ import annotations
@@ -17,10 +17,15 @@ import threading
 import time
 from datetime import datetime, timezone
 
+import numpy as np
+
 from .audio import SAMPLE_RATE, audio_chunks
 from .client import Go2rtc
+from .detector import YOLOXDetector
 from .loader import discover
+from .objects import TrackedObject
 from .plugin import Event, Plugin
+from .tracker import PersonTracker
 
 log = logging.getLogger("cctv_ai")
 
@@ -34,10 +39,12 @@ def run_plugin(plugin: Plugin, method: str, *args) -> list[Event]:
         return []
 
 
-def send(client: Go2rtc, events: list[Event]) -> None:
+def send(client: Go2rtc, events: list[Event], frame: np.ndarray | None = None) -> None:
     for e in events:
         try:
-            saved = client.send_event(e)
+            # Attach frame image for fall alerts or intrusion so snapshot is generated
+            img_to_send = frame if e.use_case in ("fall", "intrusion", "restricted_area") else None
+            saved = client.send_event(e, image=img_to_send)
             log.info("event #%s %s/%s %s %.2f", saved.get("id"), e.camera, e.use_case, e.label, e.confidence)
         except Exception as err:
             log.warning("can't send event: %s", err)
@@ -64,13 +71,24 @@ class Online:
             return self.state.get(camera, False)
 
 
-def video_loop(client: Go2rtc, camera: str, plugins: list[Plugin], online: Online, stop: threading.Event) -> None:
+def video_loop(
+    client: Go2rtc,
+    camera: str,
+    plugins: list[Plugin],
+    online: Online,
+    detector: YOLOXDetector | None,
+    tracker: PersonTracker | None,
+    stop: threading.Event,
+) -> None:
     tick = min(p.interval for p in plugins)
     last_run = {id(p): 0.0 for p in plugins}
+    has_object_plugins = any("objects" in p.needs for p in plugins)
+
     while not stop.is_set():
         if not online(camera):
             stop.wait(online.refresh)
             continue
+
         started = time.monotonic()
         due = [p for p in plugins if started - last_run[id(p)] >= p.interval]
         if due:
@@ -79,11 +97,32 @@ def video_loop(client: Go2rtc, camera: str, plugins: list[Plugin], online: Onlin
             except Exception as err:
                 log.debug("%s: no frame (%s)", camera, err)
                 frame = None
+
             if frame is not None:
                 ts = datetime.now(timezone.utc)
+
+                # Run shared detection & tracking once per frame if any plugin needs objects
+                active_objects: list[TrackedObject] = []
+                ended_objects: list[TrackedObject] = []
+
+                if has_object_plugins and detector is not None and tracker is not None:
+                    dets = detector.detect(frame)
+                    active_objects, ended_objects = tracker.update(dets, ts)
+
                 for p in due:
                     last_run[id(p)] = started
-                    send(client, run_plugin(p, "on_frame", camera, frame, ts))
+                    # 1. Run on_frame
+                    if "video" in p.needs and hasattr(p, "on_frame"):
+                        events = run_plugin(p, "on_frame", camera, frame, ts)
+                        if events:
+                            send(client, events, frame=frame)
+
+                    # 2. Run on_objects
+                    if "objects" in p.needs and hasattr(p, "on_objects"):
+                        events = run_plugin(p, "on_objects", camera, frame, ts, active_objects, ended_objects)
+                        if events:
+                            send(client, events, frame=frame)
+
         stop.wait(max(0.0, tick - (time.monotonic() - started)))
 
 
@@ -101,7 +140,7 @@ def audio_loop(client: Go2rtc, camera: str, plugins: list[Plugin], online: Onlin
                     send(client, run_plugin(p, "on_audio", camera, samples, SAMPLE_RATE, ts))
         except Exception as err:
             log.warning("%s: audio stopped (%s)", camera, err)
-        stop.wait(5)  # camera offline or stream ended: retry
+        stop.wait(5)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -113,8 +152,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
-                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
     available = discover()
     if args.list:
@@ -144,18 +185,40 @@ def main(argv: list[str] | None = None) -> None:
     plugins = [available[n]() for n in names]
     for p in plugins:
         p.setup(cameras)
-    video = [p for p in plugins if "video" in p.needs]
+
+    video = [p for p in plugins if "video" in p.needs or "objects" in p.needs]
     audio = [p for p in plugins if "audio" in p.needs]
     log.info("plugins=%s cameras=%s", names, cameras)
+
+    # Initialize shared detector and per-camera trackers if needed
+    detector = None
+    trackers = {}
+    if any("objects" in p.needs for p in video):
+        detector = YOLOXDetector()
+        for cam in cameras:
+            trackers[cam] = PersonTracker(camera=cam)
 
     stop = threading.Event()
     online = Online(client)
     threads = []
     for cam in cameras:
         if video:
-            threads.append(threading.Thread(target=video_loop, args=(client, cam, video, online, stop), daemon=True))
+            threads.append(
+                threading.Thread(
+                    target=video_loop,
+                    args=(client, cam, video, online, detector, trackers.get(cam), stop),
+                    daemon=True,
+                )
+            )
         if audio:
-            threads.append(threading.Thread(target=audio_loop, args=(client, cam, audio, online, stop), daemon=True))
+            threads.append(
+                threading.Thread(
+                    target=audio_loop,
+                    args=(client, cam, audio, online, stop),
+                    daemon=True,
+                )
+            )
+
     for t in threads:
         t.start()
     try:
