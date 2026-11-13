@@ -59,7 +59,7 @@ class Plugin(Base):
     needs = {"video"}
     interval = 0.5
 
-    learn_checks = 120  # checks (0.5 s each, so 60 s) to learn what this camera normally looks like
+    learn_checks = 40  # checks (0.5 s each, so 20 s) to learn what this camera normally looks like
     relearn_checks = 20  # after a day/night (colour/IR) switch, or after accepting a new position
     persist = 2  # checks in a row before an event (and before "restored"): 1 s
     unsure_persist = 6  # 3 s for a borderline "moved": people close to the lens hide most of the view for a moment
@@ -114,6 +114,7 @@ class Plugin(Base):
             cam.learning -= 1
             if cam.learning == 0:
                 self.set_reference(cam, v)
+                log.info("%s: tampering baseline learning complete, active", camera)
             return []
 
         problem = self.problem(cam, v, visible, previous)

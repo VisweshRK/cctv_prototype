@@ -281,6 +281,9 @@ class PersonTracker:
                 iy2 = min(b1[3], b2[3])
                 inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
                 if inter > 0:
+                    union = a1 + a2 - inter
+                    iou = inter / union if union > 0 else 0.0
+                    containment = inter / a1
                     is_inner_sub_box = (containment >= 0.60) and (b1[1] >= b2[1] + 0.15 * h2)
                     if iou >= 0.55 or is_inner_sub_box or (containment >= 0.85 and abs(cx1 - cx2) < 0.15 * min(w1, w2)):
                         suppressed = True

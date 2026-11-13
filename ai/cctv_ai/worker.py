@@ -106,8 +106,11 @@ def video_loop(
                 ended_objects: list[TrackedObject] = []
 
                 if has_object_plugins and detector is not None and tracker is not None:
-                    dets = detector.detect(frame)
-                    active_objects, ended_objects = tracker.update(dets, ts)
+                    try:
+                        dets = detector.detect(frame)
+                        active_objects, ended_objects = tracker.update(dets, ts)
+                    except Exception:
+                        log.exception("detector/tracker failed for %s", camera)
 
                 for p in due:
                     last_run[id(p)] = started
