@@ -1,0 +1,58 @@
+version: '3.8'
+
+services:
+  # 1. PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: presence-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: presence
+      POSTGRES_PASSWORD: presence_pass
+      POSTGRES_DB: presence_b2c
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U presence -d presence_b2c"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 2. go2rtc Streaming Server (RTSP / WebRTC / MSE Gateway)
+  go2rtc:
+    image: alexxit/go2rtc:latest
+    container_name: presence-go2rtc
+    restart: unless-stopped
+    ports:
+      - "1984:1984" # API / Web UI
+      - "8554:8554" # RTSP
+      - "8555:8555" # WebRTC
+    volumes:
+      - ./go2rtc.yaml:/config/go2rtc.yaml:ro
+    network_mode: host
+
+  # 3. Presence B2C AI FastAPI Backend
+  presence-api:
+    build:
+      context: ..
+      dockerfile: infrastructure/Dockerfile
+    container_name: presence-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://presence:presence_pass@postgres:5432/presence_b2c
+      - SECRET_KEY=presence-b2c-production-secret-key-change-in-production
+      - GO2RTC_API_URL=http://localhost:1984
+      - USE_INT8_DETECTOR=1
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../storage/snapshots:/app/storage/snapshots
+      - ../ai/models:/app/ai/models
+
+volumes:
+  postgres_data:

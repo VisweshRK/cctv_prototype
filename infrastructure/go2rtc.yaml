@@ -1,0 +1,20 @@
+# go2rtc Configuration for Presence B2C CCTV Platform
+# Supports RTSP, WebRTC, MSE, and HLS streaming
+
+api:
+  listen: ":1984"
+
+rtsp:
+  listen: ":8554"
+
+webrtc:
+  listen: ":8555"
+  candidates:
+    - 127.0.0.1:8555
+    - stun:8555
+
+streams:
+  # Default stream for main camera (can map to external RTSP or local loopback)
+  camera_main:
+    - rtsp://127.0.0.1:8554/camera_main
+    - ffmpeg:http://127.0.0.1:8000/api/cameras/camera_main/live#video=h264

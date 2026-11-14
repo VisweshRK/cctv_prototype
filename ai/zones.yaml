@@ -1,0 +1,52 @@
+# Presence B2C Monitoring Zones & Appliance ROI Configuration
+zones:
+  - zone_id: zone_living_room
+    name: Living Room Main Space
+    camera_id: camera_main
+    polygon:
+      - [20, 20]
+      - [620, 20]
+      - [620, 460]
+      - [20, 460]
+    zone_type: room
+    loiter_threshold_seconds: 10
+    color: "#10B981"
+
+  - zone_id: zone_entrance
+    name: Front Entrance Door
+    camera_id: camera_main
+    polygon:
+      - [50, 150]
+      - [170, 150]
+      - [170, 350]
+      - [50, 350]
+    zone_type: intrusion
+    loiter_threshold_seconds: 5
+    color: "#3B82F6"
+
+# Visual appliance regions of interest (ROI) for Electricity During Absence Analytics
+appliances:
+  - id: light_main
+    name: Ceiling Chandelier / Main Light
+    camera_id: camera_main
+    type: light
+    box: [50, 50, 150, 150]
+    brightness_off: 45.0
+    brightness_on: 195.0
+    threshold: 130.0
+
+  - id: tv_display
+    name: Living Room Television
+    camera_id: camera_main
+    type: tv
+    box: [400, 80, 550, 200]
+    brightness_off: 30.0
+    brightness_on: 120.0
+    threshold: 90.0
+
+  - id: ceiling_fan
+    name: Ceiling Fan Blades
+    camera_id: camera_main
+    type: fan
+    box: [250, 20, 350, 100]
+    motion_diff_threshold: 4.0
