@@ -34,10 +34,13 @@ class TestSlots(unittest.TestCase):
         for name, cls in discover().items():
             with self.subTest(plugin=name):
                 self.assertEqual(cls.use_case, name, "use_case must match the folder name")
-                self.assertTrue(cls.needs and cls.needs <= {"video", "audio"})
+                self.assertTrue(cls.needs and cls.needs <= {"video", "audio", "objects"})
                 p = cls()
                 p.setup(["cam1"])
-                for e in p.on_frame("cam1", frame, now) + p.on_audio("cam1", audio, 16000, now):
+                events = p.on_frame("cam1", frame, now) + p.on_audio("cam1", audio, 16000, now)
+                if "objects" in cls.needs:
+                    events += p.on_objects("cam1", frame, now, [], [])
+                for e in events:
                     self.assertIsInstance(e, Event)
                     self.assertEqual(e.use_case, name)
                     self.assertTrue(0 <= e.confidence <= 1)

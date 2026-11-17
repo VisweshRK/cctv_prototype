@@ -1,0 +1,30 @@
+cam1:
+  room:
+    points:
+    - - 0.0
+      - 0.0
+    - - 1.0
+      - 0.0
+    - - 1.0
+      - 1.0
+    - - 0.0
+      - 1.0
+    objects:
+    - person
+    inertia: 3
+    loitering_time: 0
+cam2:
+  room:
+    points:
+    - - 0.0
+      - 0.0
+    - - 1.0
+      - 0.0
+    - - 1.0
+      - 1.0
+    - - 0.0
+      - 1.0
+    objects:
+    - person
+    inertia: 3
+    loitering_time: 0
