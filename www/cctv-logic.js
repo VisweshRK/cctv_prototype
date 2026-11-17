@@ -386,6 +386,14 @@ const CYCLE = [
         data: {area: 'Reception', detail: 'Face not in the known list', box: [0.45, 0.2, 0.57, 0.42]}},
     {use_case: 'vehicle_lpr', label: 'plate', confidence: 0.9,
         data: {area: 'Main gate', plate: 'TN09BX4821', detail: 'Car entering, plate read', box: [0.38, 0.62, 0.56, 0.74]}},
+    {use_case: 'fall', label: 'fall', confidence: 0.93,
+        data: {area: 'Living room', detail: 'Person down for 3 s', box: [0.28, 0.42, 0.65, 0.94]}},
+    {use_case: 'baby_crying', label: 'crying', confidence: 0.89,
+        data: {area: 'Audio', detail: 'Baby crying detected'}},
+    {use_case: 'power_when_absent', label: 'power_wasted', confidence: 0.88,
+        data: {area: 'Room', detail: 'Power on with nobody present', minutes: 12, watts: 110, kwh: 0.022}},
+    {use_case: 'occupancy', label: 'count', confidence: 1,
+        data: {zone: 'room', count: 2, detail: '2 people present'}},
 ];
 
 /**
@@ -409,7 +417,7 @@ export function simulated(i, cameras) {
         camera,
         use_case: c.use_case,
         label: c.label,
-        confidence: Math.round((c.confidence + wobble - 0.02) * 100) / 100,
-        data: {...c.data, box: [...c.data.box]},
+        confidence: Math.min(1, Math.round((c.confidence + wobble - 0.02) * 100) / 100),
+        data: {...c.data, ...(c.data.box ? {box: [...c.data.box]} : {})},
     };
 }

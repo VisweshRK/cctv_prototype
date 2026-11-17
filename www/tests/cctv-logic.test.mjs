@@ -459,7 +459,9 @@ test('simulated', () => {
     const cycle = [0, 1, 2, 3, 4, 5].map((i) => simulated(i, cams).use_case);
     assert.deepEqual(cycle,
         ['intrusion', 'restricted_area', 'fire', 'tampering', 'face_recognition', 'vehicle_lpr']);
-    assert.equal(simulated(6, cams).use_case, 'intrusion');
+    assert.equal(simulated(6, cams).use_case, 'fall');
+    assert.deepEqual([6, 7, 8, 9].map((i) => simulated(i, cams).use_case),
+        ['fall', 'baby_crying', 'power_when_absent', 'occupancy']);
 
     const face = simulated(4, cams);
     assert.equal(face.label, 'unknown_face');
@@ -472,7 +474,7 @@ test('simulated', () => {
     for (let i = 0; i < 12; i++) {
         const s = simulated(i, cams);
         assert.deepEqual(simulated(i, cams), s, 'deterministic');
-        assert.equal(describe(s).popup, true);
+        if (s.use_case !== 'occupancy') assert.equal(describe(s).popup, true);
         assert.ok(s.confidence >= 0 && s.confidence <= 1);
         for (const k of ['id', 'time', 'snapshot', 'acknowledged_at', 'siren']) {
             assert.ok(!(k in s), k);
@@ -486,9 +488,9 @@ test('simulated', () => {
 
     // a negative i still cycles: -1 is the last use case and the last camera
     const neg = simulated(-1, ['cam1', 'cam2', 'cam3']);
-    assert.equal(neg.use_case, 'vehicle_lpr');
+    assert.equal(neg.use_case, 'occupancy');
     assert.equal(neg.camera, 'cam3');
-    assert.equal(simulated(-6, cams).use_case, 'intrusion');
+    assert.equal(simulated(-6, cams).use_case, 'face_recognition');
 
     // each call returns fresh objects
     simulated(0, cams).data.box[0] = 0.99;
@@ -508,10 +510,10 @@ test('simulated: picks a camera configured for the use case', () => {
         else assert.equal(s.camera, ['cam1', 'cam2'][i % 2], `${i}: round-robin for ${s.use_case}`);
     }
     assert.equal(simulated(1, cams).camera, 'cam1'); // restricted_area: only cam1
-    assert.equal(simulated(7, cams).camera, 'cam1');
+    assert.equal(simulated(7, cams).camera, 'cam2');
     assert.equal(simulated(5, cams).camera, 'cam2'); // vehicle_lpr: only cam2
     // a use case on several cameras takes turns between them
-    assert.deepEqual([0, 6, 12, 18].map((i) => simulated(i, cams).camera), ['cam1', 'cam2', 'cam1', 'cam2']);
+    assert.deepEqual([0, 6, 12, 18].map((i) => simulated(i, cams).camera), ['cam1', 'cam1', 'cam1', 'cam1']);
 
     // no use cases known (status not loaded yet, or bad entries): round-robin by name
     assert.equal(simulated(1, [{name: 'cam1'}, {name: 'cam2', use_cases: 'x'}]).camera, 'cam2');

@@ -57,7 +57,7 @@ They will be ported into main's `Plugin`/`Event` contract, with event data shape
 
 - Plugin discovery imports `ai/plugins/<slot>/__init__.py` and requires a class named `Plugin` subclassing `cctv_ai.plugin.Plugin`.
 - Main currently has all ten requested slot folders plus `example_motion`; only `tampering` and `example_motion` are enabled by default.
-- The current worker fetches frames synchronously through the HTTP JPEG endpoint, runs all due plugins serially, and sends events synchronously. This is the suspected source of live-camera contention and will be measured before and after the performance changes.
+- The worker now uses one latest-frame RTSP capture buffer per camera, falls back to HTTP JPEG when no fresh RTSP frame is available, isolates detector/plugin failures, and sends events through a bounded asynchronous queue. Capture FPS, detector/plugin timings, and queue drops are observable in logs. A controlled before/after camera benchmark was not available in the sandbox and is documented as a deployment follow-up in `docs/INTEGRATION_REPORT.md`.
 - The event contract is `camera`, `use_case`, `label`, `confidence`, optional `time`, `snapshot`, and `data`.
 - The dashboard already has entries for all ten requested use cases and existing helpers for `box`, `area`/`zone`, `detail`, occupancy counts, and energy waste. Ported event fields must match these helpers.
 

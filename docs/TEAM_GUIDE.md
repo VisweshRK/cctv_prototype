@@ -13,7 +13,8 @@ cameras ──> go2rtc (Go) ──frames/audio──> AI worker (Python) ──e
 
 - **go2rtc** (Go, already done) connects to the cameras once and gives live view at http://localhost:1984.
   It also detects a camera going offline.
-- **The AI worker** (Python, `ai/`) gives every frame to each use-case plugin. **Your job is one plugin.**
+- **The AI worker** (Python, `ai/`) captures the latest RTSP frame per camera, shares it with use-case
+  plugins, and drops stale frames instead of allowing latency to grow. **Your job is one plugin.**
 - A plugin looks at a frame (or 1 s of sound) and returns events like
   `{"camera": "cam1", "use_case": "fire", "label": "smoke", "confidence": 0.8}`.
 
@@ -107,6 +108,9 @@ If that works, your setup is done.
 | 10 | Baby crying | `ai/plugins/baby_crying` | P1 Mohanraj | camera audio |
 
 Viswesh owns the shared code (worker, detector, go2rtc config, cameras) and helps P2 with models.
+The integration branch keeps all ten slots in main's structure. Fire, baby crying, and
+power-when-absent were ported from the unrelated platform branch to the `Plugin`/`Event` contract;
+do not import that branch's FastAPI, Vite, database, or `StandardAIEvent` architecture.
 
 **Shared detector: don't build your own person/car detector.** One detector runs once per frame for
 everyone (so the laptop runs one model, not five) and gives each plugin a list of boxes:
@@ -156,7 +160,8 @@ list, and test it with hand-made boxes.
 4. **Use the event format exactly:** `use_case` = your folder name; `label` from your README;
    `confidence` between 0 and 1; extra details in `data`. Use `self.event(...)` to build events.
 5. **One event per incident, not per frame.** Use a cooldown, like `example_motion` does.
-6. **Load models once, in `setup()`.** `on_frame()` must be fast; a slow plugin slows everyone's.
+6. **Load models once, in `setup()`.** `on_frame()`/`on_objects()` must be fast; use `heavy = True`
+   and a bounded model workload rather than blocking capture or event delivery.
 7. **No big files in git:** no model files (`.onnx`, `.pt`, `.tflite` are ignored), no videos. Add a
    download script or a link in your README instead.
 8. **No people's faces or footage in git.** Keep face photos and recordings on your laptop
@@ -182,6 +187,30 @@ list, and test it with hand-made boxes.
 - [ ] It keeps up with 2 cameras on a normal laptop CPU.
 - [ ] `enabled = True`, and it has a test in `ai/tests/test_<folder>.py`.
 - [ ] Your folder README says how to get the model and what the settings mean.
+
+## 7. Full-system commands
+
+From the repository root, configure `.env.example`, build go2rtc, and start the stream service:
+
+```bash
+go build -o go2rtc .
+./go2rtc
+```
+
+In a second terminal, start the worker with all enabled plugins:
+
+```bash
+cd ai
+.venv/bin/python -m cctv_ai.worker -v --cameras cam1,cam2
+```
+
+Open `http://localhost:1984/` for the dashboard. Use `python -m cctv_ai.worker --list` to inspect
+which slots are enabled. The face/vehicle models and optional YAMNet weights are downloaded by their
+slot scripts into ignored model folders; never commit weights, camera URLs, or credentials.
+
+The performance contract is: one latest-frame buffer per camera, no synchronous event POST in the
+inference path, bounded queues, and no recreation of existing `<video-stream>` elements during alert
+or status updates.
 
 ## 7. Help
 

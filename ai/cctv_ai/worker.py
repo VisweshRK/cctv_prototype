@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import queue
 import threading
 import time
 from datetime import datetime, timezone
@@ -39,7 +40,53 @@ def run_plugin(plugin: Plugin, method: str, *args) -> list[Event]:
         return []
 
 
-def send(client: Go2rtc, events: list[Event], frame: np.ndarray | None = None) -> None:
+class EventSender:
+    """Bounded non-blocking event sender; inference never waits on HTTP."""
+    def __init__(self, client: Go2rtc, maxsize: int = 64):
+        self.client = client
+        self.items: queue.Queue[tuple[Event, np.ndarray | None]] = queue.Queue(maxsize=maxsize)
+        self.drops = 0
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._run, name="cctv-event-sender", daemon=True)
+        self.thread.start()
+
+    def put(self, events: list[Event], frame: np.ndarray | None = None) -> None:
+        for event in events:
+            try:
+                self.items.put_nowait((event, frame))
+            except queue.Full:
+                self.drops += 1
+                log.warning("event queue full; dropping %s/%s", event.use_case, event.label)
+
+    def _run(self) -> None:
+        while not self.stop.is_set() or not self.items.empty():
+            try:
+                event, frame = self.items.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            try:
+                img = frame if event.use_case in ("fall", "intrusion", "restricted_area") else None
+                saved = self.client.send_event(event, image=img)
+                log.info("event #%s %s/%s %s %.2f", saved.get("id"), event.camera, event.use_case, event.label, event.confidence)
+            except Exception as err:
+                log.warning("can't send event: %s", err)
+            finally:
+                self.items.task_done()
+
+    def close(self) -> None:
+        self.stop.set()
+        self.thread.join(timeout=3)
+        log.info("event sender stopped: queued=%d dropped=%d", self.items.qsize(), self.drops)
+
+    def stats(self) -> dict[str, int]:
+        return {"queued": self.items.qsize(), "dropped": self.drops}
+
+
+def send(client: Go2rtc, events: list[Event], frame: np.ndarray | None = None,
+         sender: EventSender | None = None) -> None:
+    if sender is not None:
+        sender.put(events, frame)
+        return
     for e in events:
         try:
             # Attach frame image for fall alerts or intrusion so snapshot is generated
@@ -79,10 +126,38 @@ def video_loop(
     detector: YOLOXDetector | None,
     tracker: PersonTracker | None,
     stop: threading.Event,
+    sender: EventSender | None = None,
 ) -> None:
     tick = min(p.interval for p in plugins)
     last_run = {id(p): 0.0 for p in plugins}
     has_object_plugins = any("objects" in p.needs for p in plugins)
+
+    latest: list[np.ndarray | None] = [None]
+    latest_ts: list[float] = [0.0]
+    capture_count = [0]
+    capture_started = time.monotonic()
+    frame_lock = threading.Lock()
+
+    def capture() -> None:
+        """Continuously capture and overwrite the previous frame; never queue frames."""
+        import cv2
+        cap = cv2.VideoCapture(client.rtsp_url(camera))
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        try:
+            while not stop.is_set():
+                ok, captured_frame = cap.read()
+                if ok and captured_frame is not None:
+                    with frame_lock:
+                        latest[0] = captured_frame
+                        latest_ts[0] = time.monotonic()
+                        capture_count[0] += 1
+                else:
+                    time.sleep(0.05)
+        finally:
+            cap.release()
+
+    threading.Thread(target=capture, name=f"capture-{camera}", daemon=True).start()
+    last_frame_ts = 0.0
 
     while not stop.is_set():
         if not online(camera):
@@ -93,12 +168,18 @@ def video_loop(
         due = [p for p in plugins if started - last_run[id(p)] >= p.interval]
         if due:
             try:
-                frame = client.frame(camera)
+                with frame_lock:
+                    frame = latest[0]
+                    frame_ts = latest_ts[0]
+                if frame is None or frame_ts <= last_frame_ts:
+                    frame = client.frame(camera)
+                    frame_ts = time.monotonic() if frame is not None else frame_ts
             except Exception as err:
                 log.debug("%s: no frame (%s)", camera, err)
                 frame = None
 
             if frame is not None:
+                last_frame_ts = frame_ts
                 ts = datetime.now(timezone.utc)
 
                 # Run shared detection & tracking once per frame if any plugin needs objects
@@ -106,30 +187,42 @@ def video_loop(
                 ended_objects: list[TrackedObject] = []
 
                 if has_object_plugins and detector is not None and tracker is not None:
+                    detect_started = time.perf_counter()
                     try:
                         dets = detector.detect(frame)
                         active_objects, ended_objects = tracker.update(dets, ts)
                     except Exception:
                         log.exception("detector/tracker failed for %s", camera)
+                    else:
+                        log.debug("%s detector/tracker %.1f ms", camera, (time.perf_counter() - detect_started) * 1000)
 
                 for p in due:
                     last_run[id(p)] = started
+                    plugin_started = time.perf_counter()
                     # 1. Run on_frame
                     if "video" in p.needs and hasattr(p, "on_frame"):
                         events = run_plugin(p, "on_frame", camera, frame, ts)
                         if events:
-                            send(client, events, frame=frame)
+                            send(client, events, frame=frame, sender=sender)
 
                     # 2. Run on_objects
                     if "objects" in p.needs and hasattr(p, "on_objects"):
                         events = run_plugin(p, "on_objects", camera, frame, ts, active_objects, ended_objects)
                         if events:
-                            send(client, events, frame=frame)
+                            send(client, events, frame=frame, sender=sender)
+                    log.debug("%s/%s %.1f ms", camera, p.use_case, (time.perf_counter() - plugin_started) * 1000)
+
+                elapsed = time.monotonic() - capture_started
+                if elapsed >= 30:
+                    log.info("%s capture %.1f fps (%d frames)", camera, capture_count[0] / elapsed, capture_count[0])
+                    capture_started = time.monotonic()
+                    capture_count[0] = 0
 
         stop.wait(max(0.0, tick - (time.monotonic() - started)))
 
 
-def audio_loop(client: Go2rtc, camera: str, plugins: list[Plugin], online: Online, stop: threading.Event) -> None:
+def audio_loop(client: Go2rtc, camera: str, plugins: list[Plugin], online: Online,
+               stop: threading.Event, sender: EventSender | None = None) -> None:
     while not stop.is_set():
         if not online(camera):
             stop.wait(online.refresh)
@@ -140,7 +233,7 @@ def audio_loop(client: Go2rtc, camera: str, plugins: list[Plugin], online: Onlin
                     return
                 ts = datetime.now(timezone.utc)
                 for p in plugins:
-                    send(client, run_plugin(p, "on_audio", camera, samples, SAMPLE_RATE, ts))
+                    send(client, run_plugin(p, "on_audio", camera, samples, SAMPLE_RATE, ts), sender=sender)
         except Exception as err:
             log.warning("%s: audio stopped (%s)", camera, err)
         stop.wait(5)
@@ -203,13 +296,14 @@ def main(argv: list[str] | None = None) -> None:
 
     stop = threading.Event()
     online = Online(client)
+    sender = EventSender(client)
     threads = []
     for cam in cameras:
         if video:
             threads.append(
                 threading.Thread(
                     target=video_loop,
-                    args=(client, cam, video, online, detector, trackers.get(cam), stop),
+                    args=(client, cam, video, online, detector, trackers.get(cam), stop, sender),
                     daemon=True,
                 )
             )
@@ -217,7 +311,7 @@ def main(argv: list[str] | None = None) -> None:
             threads.append(
                 threading.Thread(
                     target=audio_loop,
-                    args=(client, cam, audio, online, stop),
+                    args=(client, cam, audio, online, stop, sender),
                     daemon=True,
                 )
             )
@@ -229,6 +323,8 @@ def main(argv: list[str] | None = None) -> None:
             time.sleep(1)
     except KeyboardInterrupt:
         stop.set()
+    finally:
+        sender.close()
 
 
 if __name__ == "__main__":
