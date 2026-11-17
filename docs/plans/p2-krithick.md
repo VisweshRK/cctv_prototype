@@ -55,8 +55,8 @@ on_objects: person, true_positive, not yet decided
    - Accept when the weighted average ≥ `recognition_threshold` (start at 0.8; Frigate uses 0.9 with
      its own score scale; tune on our cameras).
    - Stop after 12 attempts, or 6 once recognised.
-5. **Events** (one per person track): `label: "known_person"` with `data: {"name": ...}`, or
-   `label: "unknown_person"` after 12 attempts with no match. Attach the best face snapshot.
+5. **Events** (one per person track): `label: "known_face"` with `data: {"name": ...}`, or
+   `label: "unknown_face"` after 12 attempts with no match. Attach the best face snapshot.
 6. Tests: the voting function with fake attempt lists; the embedding pipeline on 2–3 public test
    faces (for example OpenCV's sample images), not team photos.
 
@@ -102,6 +102,6 @@ on_objects: car / motorcycle / bus / truck, true_positive
 ## Done when
 
 - Faces: a known person is named correctly within ~2 s of facing the camera; strangers come out as
-  `unknown_person`; one event per visit, not per frame.
+  `unknown_face`; one event per visit, not per frame.
 - Plates: correct plate for most daytime cars at the gate on test clips, one event per vehicle;
   results (right / wrong / missed) written in the folder README.

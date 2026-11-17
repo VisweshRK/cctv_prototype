@@ -20,6 +20,7 @@ class PlateRead:
     plate: str
     conf: float  # average character confidence 0..1
     area: int = 0
+    box: tuple[float, float, float, float] | None = None  # [x1, y1, x2, y2], 0..1
 
 
 def cluster_reads(reads: list[PlateRead], threshold: float = 0.85) -> list[list[PlateRead]]:

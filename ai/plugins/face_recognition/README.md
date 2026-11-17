@@ -17,8 +17,8 @@ for detection with 5 landmarks and
 
 | label | confidence | data |
 | --- | --- | --- |
-| `known_person` | weighted vote score 0..1 | `{"name": "krithick"}` |
-| `unknown_person` | best attempt score | - |
+| `known_face` | weighted vote score 0..1 | `{"name": "krithick"}` |
+| `unknown_face` | best attempt score | - |
 
 A face snapshot JPEG is written to `data/snapshots/face_recognition/` and its path goes in
 `Event.snapshot`.

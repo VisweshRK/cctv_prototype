@@ -101,6 +101,7 @@ class TestPluginEvents(unittest.TestCase):
         plugin.boxes = {}
         plugin.announced = {}
         plugin.reported = set()
+        plugin.box_fractions = {"cam1:visit1": [0.1, 0.2, 0.3, 0.4]}
         vote = plugin.votes["cam1:visit1"]
         for _ in range(vote.max_attempts):
             vote.add(None, 0.3, 2000)
@@ -108,8 +109,9 @@ class TestPluginEvents(unittest.TestCase):
         events = plugin._events_for("cam1", "cam1:visit1", ended=False)
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].use_case, "face_recognition")
-        self.assertEqual(events[0].label, "unknown_person")
+        self.assertEqual(events[0].label, "unknown_face")
         self.assertEqual(events[0].confidence, 0.3)
+        self.assertEqual(events[0].data["box"], [0.1, 0.2, 0.3, 0.4])
 
         # the same visit must not be announced again while the face stays in view
         self.assertEqual(plugin._events_for("cam1", "cam1:visit1", ended=False), [])

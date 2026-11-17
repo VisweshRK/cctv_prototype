@@ -2,7 +2,7 @@
 
 Builds a short 720p clip from the gallery photos (known people), a stranger
 photo, and a rendered Indian plate, then runs it through:
-  1. the face plugin's demo path (on_frame)  -> expect known_person events
+  1. the face plugin's demo path (on_frame)  -> expect known_face events
   2. the LPR plugin's demo path (on_frame)   -> expect a vehicle event
   3. the test bench runner (process_video_frames) -> expect both decisions
 
@@ -129,17 +129,17 @@ def main() -> int:
 
     # 1 + 2: the plugin paths the worker will use
     face_events, plate_events = run_plugins(frames)
-    known = {e.data.get("name") for _, e in face_events if e.label == "known_person"}
-    unknown = sum(1 for _, e in face_events if e.label == "unknown_person")
+    known = {e.data.get("name") for _, e in face_events if e.label == "known_face"}
+    unknown = sum(1 for _, e in face_events if e.label == "unknown_face")
     plates = {e.data["plate"] for _, e in plate_events if e.label == "vehicle"}
     print(f"face events: known={sorted(known)} unknown_count={unknown}")
     print(f"plate events: {sorted(plates)}")
     if "krithick2" not in known:
-        failures.append(f"no known_person event for krithick2 (got {sorted(known)})")
+        failures.append(f"no known_face event for krithick2 (got {sorted(known)})")
     if "TN09AB1234" not in plates:
         failures.append(f"plate TN09AB1234 not announced (got {sorted(plates)})")
     if unknown != 1:
-        failures.append(f"expected exactly 1 unknown_person event, got {unknown}")
+        failures.append(f"expected exactly 1 unknown_face event, got {unknown}")
     if any(name and name.startswith("ghost") for name in known):
         failures.append("a ghost gallery name was accepted as known")
 

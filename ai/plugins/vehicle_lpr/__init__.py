@@ -21,6 +21,7 @@ import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import yaml
@@ -85,7 +86,8 @@ class Plugin(Base):
                     return name
         return None
 
-    def _reads_from_lines(self, lines: list[tuple[tuple[float, float, float, float], str, float]]) -> list[PlateRead]:
+    def _reads_from_lines(self, lines: list[tuple[tuple[float, float, float, float], str, float]],
+                          frame_shape: tuple[int, int] | None = None) -> list[PlateRead]:
         """Plate-shaped OCR lines (or stacked pairs) turned into valid reads."""
         if not lines:
             return []
@@ -102,17 +104,28 @@ class Plugin(Base):
             plate = plates.normalize(text, self.min_plate_length)
             if plate is None or conf < self.min_read_confidence:
                 continue
-            reads.append(PlateRead(plate, conf, int(w * h)))
+            fractions = None
+            if frame_shape is not None:
+                fh, fw = frame_shape
+                fractions = (
+                    max(0.0, x / fw), max(0.0, y / fh),
+                    min(1.0, (x + w) / fw), min(1.0, (y + h) / fh),
+                )
+            reads.append(PlateRead(plate, conf, int(w * h), fractions))
         return reads
 
     def _event(self, camera: str, plate: str, conf: float, reads: int,
-               vehicle: str | None = None) -> Event:
-        event = self.event(camera, "vehicle", conf, data={
+               vehicle: str | None = None,
+               box: tuple[float, float, float, float] | None = None) -> Event:
+        data: dict[str, Any] = {
             "plate": plate,
             "vehicle": vehicle,
             "reads": reads,
             "known_as": self.known_as(plate),
-        })
+        }
+        if box:
+            data["box"] = list(box)
+        event = self.event(camera, "vehicle", conf, data=data)
         log.info("%s: plate %s conf %.2f from %d reads", camera, plate, conf, reads)
         return event
 
@@ -130,7 +143,9 @@ class Plugin(Base):
         if camera not in self.reads:
             self.reads[camera] = deque(maxlen=self.max_reads)
             self.announced[camera] = {}
-        self.reads[camera].extend(self._reads_from_lines(self.ocr.detect_text(frame)))
+        self.reads[camera].extend(
+            self._reads_from_lines(self.ocr.detect_text(frame), frame.shape[:2])
+        )
 
         result = best_plate(list(self.reads[camera]), self.cluster_threshold)
         if result is None or result[2] < self.confirm_reads:
@@ -140,7 +155,8 @@ class Plugin(Base):
         if last is not None and now - last < self.duplicate_window:
             return []
         self.announced[camera][plate] = now
-        return [self._event(camera, plate, conf, agreeing)]
+        box = next((r.box for r in self.reads[camera] if r.plate == plate and r.box), None)
+        return [self._event(camera, plate, conf, agreeing, box=box)]
 
     # ---- real path (tracked objects, once the shared pipeline lands) ----
 

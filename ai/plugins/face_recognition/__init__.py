@@ -18,6 +18,7 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -71,6 +72,7 @@ class Plugin(Base):
         self.boxes: dict[str, tuple] = {}  # demo visit id -> last face box (x, y, w, h)
         self.announced: dict[str, float] = {}  # demo camera:name -> time
         self.reported: set[str] = set()  # visits already announced
+        self.box_fractions: dict[str, list[float]] = {}  # track id -> [x1, y1, x2, y2] 0..1
         self.visits = 0
 
     # ---- shared helpers -------------------------------------------------
@@ -104,27 +106,34 @@ class Plugin(Base):
             return []
         name, score = vote.decision()
         if name is not None and vote.accepted == name:
-            label, confidence = "known_person", score
+            label, confidence = "known_face", score
         elif (ended or vote.exhausted()) and vote.accepted is None:
             # stranger left, or used up the attempts, without a match
-            label = "unknown_person"
+            label = "unknown_face"
             confidence = max(s for _, s, _ in vote.attempts)
         else:
             return []
 
-        if ":visit" in track_id and label == "known_person":  # demo mode only
+        if ":visit" in track_id and label == "known_face":  # demo mode only
             last = self.announced.get(f"{camera}:{name}")
             if last is not None and time.monotonic() - last < self.duplicate_window:
                 return []
             self.announced[f"{camera}:{name}"] = time.monotonic()
 
+        data: dict[str, Any] = {}
+        if label == "known_face":
+            data["name"] = name
+        box = self.box_fractions.get(track_id)
+        if box:
+            data["box"] = box
+
         event = self.event(camera, label, min(1.0, max(0.0, confidence)),
                            snapshot=self.snapshots.get(track_id))
-        if label == "known_person":
-            event.data = {"name": name}
+        if data:
+            event.data = data
         log.info("%s: %s %.2f after %d attempts", track_id, label, confidence, len(vote.attempts))
         self.reported.add(track_id)
-        if label == "known_person":
+        if label == "known_face":
             self._forget(track_id)
         return [event]
 
@@ -133,6 +142,7 @@ class Plugin(Base):
         self.votes.pop(track_id, None)
         self.snapshots.pop(track_id, None)
         self.boxes.pop(track_id, None)
+        self.box_fractions.pop(track_id, None)
         self.reported.discard(track_id)
 
     def _record(self, camera: str, track_id: str, frame: np.ndarray, name: str | None,
@@ -174,10 +184,16 @@ class Plugin(Base):
 
         # every face gets its own visit, matched across frames by box overlap,
         # so two people in frame never mix their votes
+        fh, fw = frame.shape[:2]
         for match in self.engine.recognise_all(frame, min_area=self.min_face_area):
             current = self._match_visit(camera, match.face.box, now)
             self.last_seen[current] = now
             self.boxes[current] = match.face.box
+            x, y, bw, bh = match.face.box
+            self.box_fractions[current] = [
+                max(0.0, x / fw), max(0.0, y / fh),
+                min(1.0, (x + bw) / fw), min(1.0, (y + bh) / fh),
+            ]
             vote = self.votes.get(current)
             if vote is not None and not vote.should_attempt():
                 continue  # already reported or out of attempts: keep the visit, stop voting
@@ -217,6 +233,12 @@ class Plugin(Base):
                 crop[:top], min_area=self.min_face_area)), None)
             if match is None or not match.usable:
                 continue  # no usable face this frame: do not burn an attempt
+            fh, fw = frame.shape[:2]
+            fx, fy, fbw, fbh = match.face.box
+            self.box_fractions[key] = [
+                max(0.0, (x1 + fx) / fw), max(0.0, (y1 + fy) / fh),
+                min(1.0, (x1 + fx + fbw) / fw), min(1.0, (y1 + fy + fbh) / fh),
+            ]
             aligned = self.engine.align_crop(crop[:top], match.face)
             events += self._record(camera, key, aligned, match.name,
                                    match.confidence, match.face)

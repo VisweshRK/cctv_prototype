@@ -185,6 +185,25 @@ class TestPluginReadAssembly(unittest.TestCase):
         lines = [((10.0, 10.0, 200.0, 40.0), "TN09AB1234", 0.5)]
         self.assertEqual(plugin._reads_from_lines(lines), [])
 
+    def test_read_carries_a_normalised_box_for_the_ui(self):
+        plugin = self._plugin()
+        lines = [((100.0, 200.0, 200.0, 40.0), "TN09AB1234", 0.99)]
+        reads = plugin._reads_from_lines(lines, (720, 1280))
+        self.assertEqual(len(reads), 1)
+        self.assertAlmostEqual(reads[0].box[0], 100 / 1280)
+        self.assertAlmostEqual(reads[0].box[1], 200 / 720)
+        self.assertAlmostEqual(reads[0].box[2], 300 / 1280)
+        self.assertAlmostEqual(reads[0].box[3], 240 / 720)
+
+    def test_event_includes_the_box(self):
+        from plugins.vehicle_lpr import Plugin
+
+        plugin = Plugin()
+        plugin.known = {}
+        event = plugin._event("cam1", "TN09AB1234", 0.9, 3, box=(0.1, 0.2, 0.3, 0.4))
+        self.assertEqual(event.data["plate"], "TN09AB1234")
+        self.assertEqual(event.data["box"], [0.1, 0.2, 0.3, 0.4])
+
 
 class TestPerCameraThrottle(unittest.TestCase):
     def test_each_camera_is_throttled_independently(self):
