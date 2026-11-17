@@ -21,6 +21,12 @@ class TestSlots(unittest.TestCase):
         self.assertTrue(USE_CASES <= set(found), USE_CASES - set(found))
         self.assertIn("example_motion", found)
 
+    def test_p2_slots_are_enabled(self):
+        """P2's two slots ship enabled, so the worker runs them by default."""
+        found = discover()
+        self.assertTrue(found["face_recognition"].enabled)
+        self.assertTrue(found["vehicle_lpr"].enabled)
+
     def test_slots_follow_contract(self):
         frame = np.zeros((360, 640, 3), np.uint8)
         audio = np.zeros(16000, np.int16)

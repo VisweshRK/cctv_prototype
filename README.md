@@ -52,6 +52,12 @@ winget install Gyan.FFmpeg
 
 No camera? Use a video file as a fake camera: see [samples/README.md](samples/README.md).
 
+### Vision test bench (temporary)
+
+`scripts\test_bench.cmd` opens a local page for trying face recognition and licence plate
+recognition on an image, video, webcam or **live RTSP source**, using the same pipeline as the
+worker. See [ai/test_bench/README.md](ai/test_bench/README.md).
+
 ## API (added by `internal/cctv`)
 
 | Endpoint | What it does |

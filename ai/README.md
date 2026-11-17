@@ -43,6 +43,20 @@ go2rtc must be running (http://localhost:1984). ffmpeg must be on PATH for H.264
   int16, in 1 s chunks, so the camera keeps a single connection.
 - If a plugin raises an exception it is logged and the other plugins keep running.
 
+## Test bench
+
+A temporary browser UI for trying the face and licence-plate models on an image, video,
+webcam or live RTSP source:
+
+```bat
+cd ai
+.venv\Scripts\python test_bench\server.py
+```
+
+Open http://localhost:8080, or run `scripts\test_bench.cmd` from the repository root. It uses
+the same `VisionPipeline` as the worker; RTSP/go2rtc setup, the live API and the plate-OCR
+cadence are documented in [test_bench/README.md](test_bench/README.md).
+
 ## Layout
 
 | Path | What |
