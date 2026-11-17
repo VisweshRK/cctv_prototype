@@ -36,3 +36,6 @@ ai/.venv/
 *.onnx
 *.pt
 *.tflite
+
+# face gallery stays on the laptop (only people who agreed)
+ai/plugins/face_recognition/faces/
