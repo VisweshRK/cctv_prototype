@@ -36,3 +36,10 @@ ai/.venv/
 *.onnx
 *.pt
 *.tflite
+
+# face gallery stays on the laptop (only people who agreed)
+ai/plugins/face_recognition/faces/
+# Personal local testing inspector tool (isolated from repo frontend)
+ai/tools/
+serve.py
+ai/cctv_ai/roboflow_detector.py

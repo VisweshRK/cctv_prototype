@@ -11,15 +11,33 @@ from cctv_ai.worker import run_plugin
 
 USE_CASES = {
     "intrusion", "tampering", "face_recognition", "restricted_area", "fall",
-    "occupancy", "power_when_absent", "fire", "vehicle_lpr", "baby_crying",
+    "occupancy", "power_when_absent", "vehicle_lpr", "baby_crying",
 }
 
 
 class TestSlots(unittest.TestCase):
+    def test_worker_has_exactly_the_seven_enabled_use_cases(self):
+        selected = {
+            "fall", "baby_crying", "face_recognition", "vehicle_lpr", "tampering",
+            "occupancy", "power_when_absent",
+        }
+        enabled = {name for name, cls in discover().items() if cls.enabled}
+        self.assertEqual(enabled, selected)
+
+    def test_fire_is_not_discovered(self):
+        """Fire/smoke was removed from the selected integration scope."""
+        self.assertNotIn("fire", discover())
+
     def test_all_slots_present(self):
         found = discover()
         self.assertTrue(USE_CASES <= set(found), USE_CASES - set(found))
         self.assertIn("example_motion", found)
+
+    def test_p2_slots_are_enabled(self):
+        """P2's two slots ship enabled, so the worker runs them by default."""
+        found = discover()
+        self.assertTrue(found["face_recognition"].enabled)
+        self.assertTrue(found["vehicle_lpr"].enabled)
 
     def test_slots_follow_contract(self):
         frame = np.zeros((360, 640, 3), np.uint8)
@@ -28,10 +46,13 @@ class TestSlots(unittest.TestCase):
         for name, cls in discover().items():
             with self.subTest(plugin=name):
                 self.assertEqual(cls.use_case, name, "use_case must match the folder name")
-                self.assertTrue(cls.needs and cls.needs <= {"video", "audio"})
+                self.assertTrue(cls.needs and cls.needs <= {"video", "audio", "objects"})
                 p = cls()
                 p.setup(["cam1"])
-                for e in p.on_frame("cam1", frame, now) + p.on_audio("cam1", audio, 16000, now):
+                events = p.on_frame("cam1", frame, now) + p.on_audio("cam1", audio, 16000, now)
+                if "objects" in cls.needs:
+                    events += p.on_objects("cam1", frame, now, [], [])
+                for e in events:
                     self.assertIsInstance(e, Event)
                     self.assertEqual(e.use_case, name)
                     self.assertTrue(0 <= e.confidence <= 1)
@@ -64,7 +85,7 @@ class TestExampleMotion(unittest.TestCase):
 
 class TestEventJSON(unittest.TestCase):
     def test_matches_go_format(self):
-        e = Event(camera="cam1", use_case="fire", label="smoke", confidence=0.7)
+        e = Event(camera="cam1", use_case="baby_crying", label="crying", confidence=0.7)
         d = e.to_json()
         self.assertEqual(set(d), {"camera", "use_case", "label", "confidence", "time"})
         datetime.fromisoformat(d["time"])

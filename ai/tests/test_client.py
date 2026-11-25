@@ -42,7 +42,7 @@ class TestSendEvent(unittest.TestCase):
         client, fake = make_client()
         frame = np.zeros((90, 160, 3), np.uint8)
         frame[20:60, 40:100] = (0, 0, 255)
-        event = Event("cam1", "intrusion", "person", 0.9, data={"area": "Server room door"})
+        event = Event("cam1", "tampering", "lens_covered", 0.9, data={"area": "Server room door"})
 
         self.assertEqual(client.send_event(event, image=frame), {"id": 1})
 

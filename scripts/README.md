@@ -1,5 +1,22 @@
 # Scripts
 
+## Start the local CCTV prototype (Windows)
+
+After setting camera RTSP URLs in `.env` and installing `ai/requirements.txt`, run:
+
+```powershell
+.\scripts\run.ps1
+```
+
+The script builds the Go server when needed, starts it and the AI worker in hidden windows, checks the
+main API, and prints the dashboard and health links. Stop those processes with:
+
+```powershell
+.\scripts\run.ps1 -Stop
+```
+
+Use `-Rebuild` to force a fresh Go binary build.
+
 This folder contains a script for building binaries for all platforms.
 
 The project has no `CGO` dependencies, so building is as simple as possible using the `go build` command.

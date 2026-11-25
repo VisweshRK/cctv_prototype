@@ -1,33 +1,36 @@
-# Slot: Baby crying
+# Baby crying
 
-**Status:** not built yet. Take it by opening a branch `usecase/baby_crying` (see `CONTRIBUTING.md`).
+This use case reads 16 kHz mono audio from the camera's go2rtc RTSP restream and scores one-second
+chunks with YAMNet. It uses the AudioSet `Baby cry, infant cry` class, smooths five consecutive scores,
+then opens, continues, and closes a crying episode. It does not analyze video.
 
-## Goal
-Detect a baby crying from the camera microphone.
+## Setup
 
-## Events to send
-`use_case: "baby_crying"`, labels: `baby_crying`
+Download the checksum-pinned, Apache-2.0 YAMNet ONNX file into the ignored `ai/models/` directory:
 
-## What to copy from Frigate
-- `frigate/events/audio.py`: reads only the audio track with ffmpeg (`-vn`) and runs the YAMNet sound classifier on ~1 s chunks; class `crying` is in `audio-labelmap.txt`.
-- Unlike Frigate we reuse go2rtc's single camera connection (via its RTSP restream) instead of opening a second one to the camera.
-
-## Suggested approach
-1. YAMNet (TFLite or ONNX) on the 16 kHz mono chunks the worker already gives you in `on_audio`.
-2. Skip quiet chunks first (RMS below a threshold) so the model runs rarely.
-3. Event when 'Baby cry' scores high in several chunks within ~5 s.
-4. Needs ffmpeg on PATH (the worker reads audio through it).
-
-## Where your code goes
-- `__init__.py`: fill in `setup()` (load models once) and `on_audio()`.
-- Put helper code in this folder. Model files (`*.onnx`, `*.pt`, `*.tflite`) are git-ignored, so add a
-  `download_models.py` or link in this README instead of committing them.
-- Add a test in `ai/tests/test_baby_crying.py` with a sample image/sound (small files only).
-- Set `enabled = True` when it works.
-
-## Try it
-```bash
+```powershell
 cd ai
-python -m cctv_ai.worker --plugins baby_crying -v
+.venv\Scripts\python.exe -m plugins.baby_crying.download_models
 ```
-Events show up at http://localhost:1984/api/cctv/events?use_case=baby_crying
+
+The configured camera must expose a microphone audio track. The dual-lens `.env` configuration preserves
+the source audio on cam1 with `audio=copy`; cam2 remains video-only so the worker does not process the
+same microphone twice. Restart the Go2RTC server and AI worker after changing `.env`.
+
+Check `GET /api/cctv/health`: the case is ready only when the model loads and audio arrives. If the camera
+has no audio track, health reports it disabled. Do not treat camera speaker/two-way-audio support as proof
+that its microphone is being sent in the RTSP stream.
+
+## Events
+
+The use case emits `crying`, `crying_continues`, and `crying_ended` events through the normal CCTV event
+API. This is a general pretrained sound classifier, not a model trained specifically on this camera or
+room; validate its alerts against representative audio before relying on them.
+
+## Local checks
+
+```powershell
+cd ai
+.venv\Scripts\python.exe -m unittest discover -s tests -p "test_ported_plugins.py"
+.venv\Scripts\python.exe -m plugins.baby_crying.download_models
+```

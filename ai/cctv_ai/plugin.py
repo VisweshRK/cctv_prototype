@@ -9,9 +9,12 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from .objects import TrackedObject
 
 
 @dataclass
@@ -20,7 +23,7 @@ class Event:
 
     camera: str
     use_case: str  # must match the plugin's use_case
-    label: str  # e.g. "person", "smoke", "fall"
+    label: str  # e.g. "known_person", "plate", "fall"
     confidence: float  # 0..1
     time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     snapshot: Optional[str] = None  # optional path or URL of an image
@@ -60,6 +63,17 @@ class Plugin:
 
     def on_audio(self, camera: str, samples: np.ndarray, sample_rate: int, ts: datetime) -> list[Event]:
         """samples is mono int16 PCM, about one second long."""
+        return []
+
+    def on_objects(
+        self,
+        camera: str,
+        frame: np.ndarray,
+        ts: datetime,
+        objects: list["TrackedObject"],
+        ended: list["TrackedObject"],
+    ) -> list[Event]:
+        """objects = tracked now; ended = objects the tracker lost since the last call."""
         return []
 
     def event(self, camera: str, label: str, confidence: float, **kwargs: Any) -> Event:

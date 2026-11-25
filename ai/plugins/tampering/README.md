@@ -29,7 +29,7 @@ then `moved`. A lesser problem during an incident stays quiet.
 2 checks per second (`interval = 0.5`). Each frame is shrunk to 320×180 grey (ORB needs more pixels than
 160×90).
 
-1. **Learn** what this camera normally looks like for the first 120 checks (60 s). No alerts while learning.
+1. **Learn** what this camera normally looks like for the first 40 checks (20 s at two checks per second). No alerts while learning.
    The baseline is the median of the last 600 normal checks (5 min), so it follows slow light changes.
    Cameras burn a clock and a name onto the picture, and that text stays sharp and bright when the lens is
    covered or smeared. So the measures ignore a few percent of the picture:
@@ -94,7 +94,7 @@ check. It is cheap enough (a few ms).
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `interval` | 0.5 | Seconds between checks |
-| `learn_checks` | 120 | Checks to learn the normal view at start |
+| `learn_checks` | 40 | Checks to learn the normal view at start (20 s at the configured 0.5 s interval) |
 | `relearn_checks` | 20 | Checks to learn again after a colour ↔ IR switch or a new position |
 | `persist` | 2 | Checks in a row before an event, and before `restored` |
 | `unsure_persist` | 6 | Checks in a row before a borderline `moved` (few features match, see step 4) |

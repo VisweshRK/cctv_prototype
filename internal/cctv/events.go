@@ -19,7 +19,7 @@ import (
 type Event struct {
 	ID         int64          `json:"id"`
 	Camera     string         `json:"camera"`
-	UseCase    string         `json:"use_case"`   // e.g. intrusion, fall, fire
+	UseCase    string         `json:"use_case"`   // e.g. face_recognition, fall, occupancy
 	Label      string         `json:"label"`      // e.g. person, camera_offline
 	Confidence float64        `json:"confidence"` // 0..1
 	Time       time.Time      `json:"time"`
@@ -296,8 +296,8 @@ const maxDataBytes = 64 << 10
 
 // apiEvents handles:
 //
-//	GET  /api/cctv/events?camera=cam1&use_case=intrusion&limit=50
-//	POST /api/cctv/events  {"camera":"cam1","use_case":"intrusion","label":"person","confidence":0.9,"image":"<optional base64 JPEG>"}
+//	GET  /api/cctv/events?camera=cam1&use_case=tampering&limit=50
+//	POST /api/cctv/events  {"camera":"cam1","use_case":"tampering","label":"lens_covered","confidence":0.9,"image":"<optional base64 JPEG>"}
 func (s *eventStore) apiEvents(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":

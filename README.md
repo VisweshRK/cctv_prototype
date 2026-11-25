@@ -48,9 +48,17 @@ winget install Gyan.FFmpeg
    .venv\Scripts\python -m cctv_ai.worker --list
    .venv\Scripts\python -m cctv_ai.worker -v
    ```
-   By default only the working `example_motion` plugin runs. See [ai/README.md](ai/README.md).
+   By default the seven integrated case plugins run. Check `http://localhost:1984/api/cctv/health` for
+   model/gallery/audio readiness; installed plugins can still be degraded when local model assets or
+   camera configuration are missing. See [ai/README.md](ai/README.md).
 
 No camera? Use a video file as a fake camera: see [samples/README.md](samples/README.md).
+
+### Vision test bench (temporary)
+
+`scripts\test_bench.cmd` opens a local page for trying face recognition and licence plate
+recognition on an image, video, webcam or **live RTSP source**, using the same pipeline as the
+worker. See [ai/test_bench/README.md](ai/test_bench/README.md).
 
 ## API (added by `internal/cctv`)
 
@@ -65,7 +73,7 @@ Event format (shared by Go and Python):
 ```json
 {
   "camera": "cam1",
-  "use_case": "intrusion",
+  "use_case": "tampering",
   "label": "person",
   "confidence": 0.91,
   "time": "2026-10-18T21:30:00+05:30",
@@ -82,18 +90,15 @@ appended to `data/events.jsonl` (git-ignored) and reloaded on restart.
 Each use case has its own folder with a README that says what to build and which Frigate code to read.
 Take a slot by working on a branch `usecase/<slot>` (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
-| # | Use case | Slot | Input | Owner |
-| --- | --- | --- | --- | --- |
-| 1 | Intrusion | [ai/plugins/intrusion](ai/plugins/intrusion) | video | P3 Sanjay + P4 Kishore |
-| 2 | Tampering / disconnect | [ai/plugins/tampering](ai/plugins/tampering) (disconnect is done in [internal/cctv/status.go](internal/cctv/status.go)) | video | Viswesh |
-| 3 | Face recognition | [ai/plugins/face_recognition](ai/plugins/face_recognition) | video | P2 Krithick |
-| 4 | Restricted area | [ai/plugins/restricted_area](ai/plugins/restricted_area) | video | P3 Sanjay + P4 Kishore |
-| 5 | Fall detection | [ai/plugins/fall](ai/plugins/fall) | video | P3 Sanjay + P4 Kishore |
-| 6 | Occupancy | [ai/plugins/occupancy](ai/plugins/occupancy) | video | P3 Sanjay + P4 Kishore |
-| 7 | Electricity used when nobody is there | [ai/plugins/power_when_absent](ai/plugins/power_when_absent) | video | P1 Mohanraj |
-| 8 | Fire and smoke | [ai/plugins/fire](ai/plugins/fire) | video | P1 Mohanraj |
-| 9 | Vehicle + licence plate | [ai/plugins/vehicle_lpr](ai/plugins/vehicle_lpr) | video | P2 Krithick |
-| 10 | Baby crying | [ai/plugins/baby_crying](ai/plugins/baby_crying) | audio | P1 Mohanraj |
+| # | Use case | Slot | Input |
+| --- | --- | --- | --- |
+| 1 | Fall detection | [ai/plugins/fall](ai/plugins/fall) | video |
+| 2 | Baby-cry detection | [ai/plugins/baby_crying](ai/plugins/baby_crying) | audio |
+| 3 | Face detection and recognition | [ai/plugins/face_recognition](ai/plugins/face_recognition) | video |
+| 4 | Licence-plate recognition | [ai/plugins/vehicle_lpr](ai/plugins/vehicle_lpr) | video |
+| 5 | Camera tampering | [ai/plugins/tampering](ai/plugins/tampering) and [internal/cctv/status.go](internal/cctv/status.go) | video/status |
+| 6 | Zone occupancy | [ai/plugins/occupancy](ai/plugins/occupancy) | video/zones |
+| 7 | Energy saving when a zone is empty | [ai/plugins/power_when_absent](ai/plugins/power_when_absent) | video/zones |
 
 **Shared code** (`ai/cctv_ai/`, `internal/cctv/`, `go2rtc.yaml`, camera setup, the shared object detector) is
 owned by **Viswesh**, who also helps P2 with models. Changes there go through Viswesh.

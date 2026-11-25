@@ -5,7 +5,8 @@ the rules that keep us from breaking each other's work.
 
 ## 1. What we're building
 
-A smart CCTV system for two Q-Tech Wi-Fi cameras that detects 10 kinds of incidents.
+A smart CCTV prototype for two Q-Tech Wi-Fi cameras with seven selected use cases: fall, baby crying,
+face recognition, licence-plate recognition, camera tampering, zone occupancy, and energy saving.
 
 ```
 cameras ──> go2rtc (Go) ──frames/audio──> AI worker (Python) ──events──> go2rtc API ──> live view + event list
@@ -13,9 +14,10 @@ cameras ──> go2rtc (Go) ──frames/audio──> AI worker (Python) ──e
 
 - **go2rtc** (Go, already done) connects to the cameras once and gives live view at http://localhost:1984.
   It also detects a camera going offline.
-- **The AI worker** (Python, `ai/`) gives every frame to each use-case plugin. **Your job is one plugin.**
+- **The AI worker** (Python, `ai/`) captures the latest RTSP frame per camera, shares it with use-case
+  plugins, and drops stale frames instead of allowing latency to grow. **Your job is one plugin.**
 - A plugin looks at a frame (or 1 s of sound) and returns events like
-  `{"camera": "cam1", "use_case": "fire", "label": "smoke", "confidence": 0.8}`.
+  `{"camera": "cam1", "use_case": "tampering", "label": "lens_covered", "confidence": 0.8}`.
 
 You don't need to touch Go. You don't need a camera to start (see step 3).
 
@@ -81,32 +83,31 @@ macOS/Linux: same steps with your package manager. Use `.venv/bin/python` and bu
    ```bash
    .\go2rtc.exe
    ```
-4. In a second terminal, run the worker with the example plugin:
+4. In a second terminal, list and run the seven enabled use cases:
    ```bash
    cd ai
+   .venv\Scripts\python -m cctv_ai.worker --list
    .venv\Scripts\python -m cctv_ai.worker -v
    ```
-   You should see `event #N cam1/example_motion motion ...`. Events are listed at
-   http://localhost:1984/api/cctv/events and camera status at http://localhost:1984/api/cctv/status.
+   Events are listed at http://localhost:1984/api/cctv/events and camera status at http://localhost:1984/api/cctv/status.
 
 If that works, your setup is done.
 
 ## 4. Working on your use case
 
-| # | Use case | Folder | Owner | Depends on |
-| --- | --- | --- | --- | --- |
-| 1 | Intrusion | `ai/plugins/intrusion` | P3 Sanjay + P4 Kishore | shared detector (person) |
-| 2 | Tampering (covered/blurred/moved) | `ai/plugins/tampering` | Viswesh | nothing |
-| 3 | Face recognition | `ai/plugins/face_recognition` | P2 Krithick | nothing (own face model) |
-| 4 | Restricted area | `ai/plugins/restricted_area` | P3 Sanjay + P4 Kishore | shared detector (person) |
-| 5 | Fall detection | `ai/plugins/fall` | P3 Sanjay + P4 Kishore | shared detector (person) |
-| 6 | Occupancy | `ai/plugins/occupancy` | P3 Sanjay + P4 Kishore | shared detector (person) |
-| 7 | Electricity used when nobody is there | `ai/plugins/power_when_absent` | P1 Mohanraj | occupancy (start with "lights on?" from frame brightness) |
-| 8 | Fire and smoke | `ai/plugins/fire` | P1 Mohanraj | nothing (own model) |
-| 9 | Vehicle + licence plate | `ai/plugins/vehicle_lpr` | P2 Krithick | shared detector (car), then own plate model + OCR |
-| 10 | Baby crying | `ai/plugins/baby_crying` | P1 Mohanraj | camera audio |
+| # | Use case | Folder | Depends on |
+| --- | --- | --- | --- |
+| 1 | Fall detection | `ai/plugins/fall` | shared person detector and pose model |
+| 2 | Baby-cry detection | `ai/plugins/baby_crying` | camera audio |
+| 3 | Face detection and recognition | `ai/plugins/face_recognition` | YuNet/SFace models and enrolled gallery |
+| 4 | Licence-plate recognition | `ai/plugins/vehicle_lpr` | vehicle/plate candidate and OCR |
+| 5 | Camera tampering | `ai/plugins/tampering` | video/reference frame |
+| 6 | Zone occupancy | `ai/plugins/occupancy` | shared person detector and configured zones |
+| 7 | Energy saving when a zone is empty | `ai/plugins/power_when_absent` | shared person detector and appliance regions |
 
 Viswesh owns the shared code (worker, detector, go2rtc config, cameras) and helps P2 with models.
+The integration branch contains these seven selected cases. Fire/smoke is removed from this scope;
+do not import the unrelated platform branch's FastAPI, Vite, database, or `StandardAIEvent` architecture.
 
 **Shared detector: don't build your own person/car detector.** One detector runs once per frame for
 everyone (so the laptop runs one model, not five) and gives each plugin a list of boxes:
@@ -156,7 +157,8 @@ list, and test it with hand-made boxes.
 4. **Use the event format exactly:** `use_case` = your folder name; `label` from your README;
    `confidence` between 0 and 1; extra details in `data`. Use `self.event(...)` to build events.
 5. **One event per incident, not per frame.** Use a cooldown, like `example_motion` does.
-6. **Load models once, in `setup()`.** `on_frame()` must be fast; a slow plugin slows everyone's.
+6. **Load models once, in `setup()`.** `on_frame()`/`on_objects()` must be fast; use `heavy = True`
+   and a bounded model workload rather than blocking capture or event delivery.
 7. **No big files in git:** no model files (`.onnx`, `.pt`, `.tflite` are ignored), no videos. Add a
    download script or a link in your README instead.
 8. **No people's faces or footage in git.** Keep face photos and recordings on your laptop
@@ -182,6 +184,30 @@ list, and test it with hand-made boxes.
 - [ ] It keeps up with 2 cameras on a normal laptop CPU.
 - [ ] `enabled = True`, and it has a test in `ai/tests/test_<folder>.py`.
 - [ ] Your folder README says how to get the model and what the settings mean.
+
+## 7. Full-system commands
+
+From the repository root, configure `.env.example`, build go2rtc, and start the stream service:
+
+```bash
+go build -o go2rtc .
+./go2rtc
+```
+
+In a second terminal, start the worker with all enabled plugins:
+
+```bash
+cd ai
+.venv/bin/python -m cctv_ai.worker -v --cameras cam1,cam2
+```
+
+Open `http://localhost:1984/` for the dashboard. Use `python -m cctv_ai.worker --list` to inspect
+which slots are enabled. The face/vehicle models and optional YAMNet weights are downloaded by their
+slot scripts into ignored model folders; never commit weights, camera URLs, or credentials.
+
+The performance contract is: one latest-frame buffer per camera, no synchronous event POST in the
+inference path, bounded queues, and no recreation of existing `<video-stream>` elements during alert
+or status updates.
 
 ## 7. Help
 

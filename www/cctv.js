@@ -4,7 +4,7 @@
 import './video-stream.js';
 import {
     USE_CASES, describe, areaOf, detailOf, boxOf, snapshotState, snapshotSrc, sirenText, Incidents, queueList,
-    summarize, simulated, timelineHours, barFractions, parseTime, occupancyNow, energyWaste, TARIFF,
+    summarize, timelineHours, barFractions, parseTime, occupancyNow, energyWaste, TARIFF,
 } from './cctv-logic.js';
 
 const STATUS_EVERY = 5000; // ms between GET api/cctv/status
@@ -91,7 +91,7 @@ function describeTile(t, place, useCases) {
     if (key === t.key) return;
     t.key = key;
     t.place = place;
-    t.useCases = useCases; // Simulate sends each use case to a camera configured for it
+    t.useCases = useCases;
 
     t.sub.textContent = place ? `· ${place}` : '';
 
@@ -208,6 +208,35 @@ async function pollStatus() {
     setTimeout(pollStatus, STATUS_EVERY);
 }
 
+async function pollWorkerHealth() {
+    const chip = $('worker-health');
+    try {
+        const r = await fetch('api/cctv/health', {cache: 'no-cache', signal: AbortSignal.timeout(FETCH_TIMEOUT)});
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const health = await r.json();
+        const cases = Array.isArray(health.use_cases) ? health.use_cases : [];
+        const ready = cases.filter((item) => item.state === 'ready').length;
+        const degraded = cases.filter((item) => item.state === 'degraded').length;
+        chip.classList.toggle('bad', health.worker !== 'online');
+        chip.classList.toggle('warn', health.worker === 'online' && degraded > 0);
+        chip.replaceChildren(el('i', 'pulse'), `AI worker: ${health.worker === 'online' ? `${ready}/${cases.length} ready` : 'offline'}`);
+        const caseLines = cases.map((item) => `${item.id}: ${item.state}${item.reason ? ` — ${item.reason}` : ''}`);
+        const audio = health.audio && typeof health.audio === 'object' ? health.audio : {};
+        const audioLines = Object.entries(audio).map(([camera, state]) => `Audio ${camera}: ${state.state}${state.reason ? ` — ${state.reason}` : ''}`);
+        const metrics = health.metrics && typeof health.metrics === 'object' ? health.metrics : {};
+        const captureLines = Object.entries(metrics.capture || {}).map(([camera, stat]) => `${camera} capture: ${stat.fps ?? '–'} FPS`);
+        const laneLines = Object.entries(metrics.lanes || {}).map(([lane, stat]) => `${lane}: ${stat.last_ms ?? '–'} ms · ${stat.dropped ?? 0} stale frames dropped`);
+        chip.title = [...caseLines, ...audioLines, ...captureLines, ...laneLines].join('\n') || 'No use-case health reported';
+    } catch (err) {
+        chip.classList.remove('warn');
+        chip.classList.add('bad');
+        chip.textContent = 'AI worker: unavailable';
+        chip.title = 'Worker health endpoint unavailable';
+        console.warn('[cctv] worker health unavailable:', err);
+    }
+    setTimeout(pollWorkerHealth, STATUS_EVERY);
+}
+
 // ---------------------------------------------------------------------------
 // Alerts: feed, live push, popup, acknowledge (Task 9)
 // ---------------------------------------------------------------------------
@@ -260,9 +289,6 @@ function percent(c) {
 }
 
 const ICONS = {
-    intrusion: ['M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z', 'M12 8v5', 'M12 16h.01'],
-    restricted_area: ['M12 3a9 9 0 100 18 9 9 0 000-18z', 'M7 12h10'],
-    fire: ['M12 3c1 4 5 5 5 10a5 5 0 01-10 0c0-3 2-4 2-6 2 1 3 2 3 4'],
     fall: ['M12 3a2 2 0 100 4 2 2 0 000-4z', 'M5 20l4-6 4 2 4-5', 'M3 21h18'],
     tampering: ['M3 7h12v10H3z', 'M15 10l6-3v10l-6-3', 'M2 3l20 18'],
     baby_crying: ['M4 10v4h4l5 4V6L8 10z', 'M16 9a4 4 0 010 6', 'M19 6a8 8 0 010 12'],
@@ -761,14 +787,10 @@ document.addEventListener('keydown', (ev) => {
 });
 
 // ---------------------------------------------------------------------------
-// Numbers, timeline, simulate (Task 10)
+// Numbers and timeline
 // ---------------------------------------------------------------------------
 
 const NUMBERS_EVERY = 60000; // ms; "today" and the hour buckets move on without new events
-const demo = params.get('demo') === '1';
-const simButton = $('simulate');
-const simError = $('simulate-error');
-let simNext = 0; // the i of the next simulated(i)
 
 /**
  * The KPIs, the 12-hour timeline and today's per-use-case counts, from the
@@ -814,30 +836,6 @@ function renderUseCases(perUseCase) {
         chip.append(el('i'), useCaseTitle(uc), el('b', '', n));
         return chip;
     }));
-}
-
-/**
- * POSTs the next test event, as an AI worker would. Nothing else: the feed,
- * popup and numbers follow from the server's push like for any alert.
- */
-async function simulate() {
-    const cameras = [...tiles].map(([name, t]) => ({name, use_cases: t.useCases || []}));
-    const body = simulated(simNext++, cameras);
-    try {
-        const r = await fetch('api/cctv/events', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(body),
-            signal: AbortSignal.timeout(FETCH_TIMEOUT),
-        });
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        simError.hidden = true;
-        simError.textContent = '';
-    } catch (err) {
-        console.warn('[cctv] simulate failed:', err);
-        simError.textContent = 'Could not send the test alert';
-        simError.hidden = false;
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -937,17 +935,103 @@ function renderAnalytics() {
         `${kwhText(c.kwh)} · ${c.times} time${c.times === 1 ? '' : 's'}`)));
 }
 
+// Main-site face enrollment. The server validates image bytes and the worker
+// notices a newly rebuilt gallery without reconnecting live camera streams.
+const facesPanel = $('faces-panel');
+const facesStatus = $('faces-status');
+
+async function loadFacePeople() {
+    const list = $('faces-list');
+    try {
+        const r = await fetch('api/cctv/faces', {cache: 'no-cache', signal: AbortSignal.timeout(FETCH_TIMEOUT)});
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const people = await r.json();
+        if (!Array.isArray(people)) throw new Error('gallery response is not a list');
+        list.replaceChildren(...people.map((person) => {
+            const row = el('div', 'face-row');
+            const info = el('span');
+            info.append(el('b', '', person.name), el('br'), el('small', '', `${person.photos} photo${person.photos === 1 ? '' : 's'}`));
+            const remove = el('button', 'btn', 'Remove');
+            remove.type = 'button';
+            remove.addEventListener('click', async () => {
+                if (!confirm(`Remove all locally stored photos for ${person.name}?`)) return;
+                const url = `api/cctv/faces?name=${encodeURIComponent(person.name)}`;
+                const response = await fetch(url, {method: 'DELETE', signal: AbortSignal.timeout(FETCH_TIMEOUT)});
+                if (!response.ok) { facesStatus.textContent = 'Could not remove this person.'; return; }
+                facesStatus.textContent = `${person.name} photos removed. Rebuild the gallery to apply the change.`;
+                await loadFacePeople();
+            });
+            row.append(info, remove);
+            return row;
+        }));
+        if (people.length === 0) list.append(el('div', 'empty', 'No enrolled people yet'));
+        facesStatus.textContent = `${people.length} enrolled ${people.length === 1 ? 'person' : 'people'}`;
+    } catch (err) {
+        list.replaceChildren();
+        facesStatus.textContent = 'Face gallery API unavailable. Start the main CCTV server first.';
+        console.warn('[cctv] face gallery unavailable:', err);
+    }
+}
+
+$('faces-open').addEventListener('click', () => {
+    facesPanel.hidden = false;
+    loadFacePeople();
+});
+$('faces-close').addEventListener('click', () => { facesPanel.hidden = true; });
+facesPanel.addEventListener('click', (event) => { if (event.target === facesPanel) facesPanel.hidden = true; });
+$('faces-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const name = $('faces-name').value.trim();
+    const files = [...$('faces-files').files];
+    if (!name || files.length === 0) { facesStatus.textContent = 'Enter a name and choose at least one photo.'; return; }
+    $('faces-upload').disabled = true;
+    let done = 0;
+    for (const file of files) {
+        const body = new FormData();
+        body.set('name', name);
+        body.set('photo', file);
+        try {
+            const r = await fetch('api/cctv/faces', {method: 'POST', body, signal: AbortSignal.timeout(FETCH_TIMEOUT)});
+            const data = await r.json();
+            if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+            done++;
+            facesStatus.textContent = `Uploaded ${done}/${files.length} photos…`;
+        } catch (err) {
+            facesStatus.textContent = `Uploaded ${done}/${files.length}. ${err.message}`;
+            break;
+        }
+    }
+    $('faces-upload').disabled = false;
+    $('faces-files').value = '';
+    if (done === files.length) facesStatus.textContent = `Added ${done} photo${done === 1 ? '' : 's'} for ${name}. Build the gallery to apply them.`;
+    await loadFacePeople();
+});
+$('faces-rebuild').addEventListener('click', async () => {
+    const button = $('faces-rebuild');
+    button.disabled = true;
+    facesStatus.textContent = 'Building face embeddings…';
+    try {
+        const r = await fetch('api/cctv/faces/rebuild', {method: 'POST', signal: AbortSignal.timeout(130000)});
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error + (data.detail ? ` · ${data.detail}` : ''));
+        facesStatus.textContent = data.message || 'Gallery rebuilt. Recognition will update on the next frames.';
+    } catch (err) {
+        facesStatus.textContent = err.message || 'Gallery rebuild failed.';
+    } finally {
+        button.disabled = false;
+        await loadFacePeople();
+    }
+});
+
 // ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
-
-simButton.hidden = !demo;
-if (demo) simButton.addEventListener('click', simulate);
 
 tick();
 setInterval(tick, 1000);
 setInterval(renderNumbers, NUMBERS_EVERY); // the only numbers timer; event changes redraw at once
 pollStatus();
+pollWorkerHealth();
 connect(); // its open event loads the alert list
 loadFeed();
 loadAnalytics();
