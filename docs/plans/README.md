@@ -6,9 +6,9 @@ the same Frigate ideas (motion first, region crops, tracker, median score, zones
 | Plan | Who | Use cases |
 | --- | --- | --- |
 | [viswesh.md](viswesh.md) | Viswesh | Video pipeline, shared detector + tracker, camera tampering, model help for P2 |
-| [p1-mohanraj.md](p1-mohanraj.md) | P1 Mohanraj | Fire and smoke, electricity used when nobody is there, baby crying |
+| [p1-mohanraj.md](p1-mohanraj.md) | P1 Mohanraj | Electricity used when nobody is there, baby crying |
 | [p2-krithick.md](p2-krithick.md) | P2 Krithick | Face recognition, vehicle + licence plate |
-| [p3-p4-sanjay-kishore.md](p3-p4-sanjay-kishore.md) | P3 Sanjay + P4 Kishore | Intrusion, restricted area, occupancy, fall |
+| [p3-p4-sanjay-kishore.md](p3-p4-sanjay-kishore.md) | P3 Sanjay + P4 Kishore | Occupancy, fall |
 
 ## The architecture everyone builds on
 
@@ -19,11 +19,9 @@ go2rtc ──restream──> frame reader (ffmpeg, 5 fps, raw BGR) ──> motio
                                                                                          │
                                                       TrackedObject list (id, label, box, median score, ...)
                                                                                          │
-      ┌──────────────┬──────────────┬───────────────┬───────────────┬──────────────────┬─┴─────────────┐
-   intrusion   restricted_area   occupancy        fall       power_when_absent   face_recognition  vehicle_lpr
-   (zones)        (zones)        (counts)        (pose)       (counts + lights)   (YuNet + SFace)   (OCR)
-
-   raw frame ──> tampering, fire          audio (16 kHz) ──> baby_crying (YAMNet)
+   shared person tracks ──> fall, occupancy, power_when_absent
+   raw frame ──────────────> face_recognition, vehicle_lpr, tampering
+   camera audio (16 kHz) ──> baby_crying
 ```
 
 Rules that make this work:
@@ -115,10 +113,8 @@ centre popup, except these, which go only to the alert feed:
 - `vehicle_lpr` without `data.plate` (a vehicle pops up only with a plate, as "Vehicle · <plate>");
 - `tampering` with label `camera_online` ("Camera back online") or `restored` ("Camera view restored").
 
-**What rings the camera siren** (`internal/cctv/cctv.go` defaults, `siren.go`): `intrusion`,
-`restricted_area` and `fire`. The siren plays on the two-way-audio speaker of **the camera that saw
-it** only, until a guard acknowledges every such alert on that camera (or for at most 3 minutes).
-The list can be changed with `cctv.siren.use_cases` in the go2rtc config.
+The seven selected use cases use the same event feed and acknowledgement system. Camera sirens are
+disabled by default for this integration.
 
 Full design: [../superpowers/specs/2026-10-19-demo-ui-design.md](../superpowers/specs/2026-10-19-demo-ui-design.md).
 
@@ -127,7 +123,7 @@ Full design: [../superpowers/specs/2026-10-19-demo-ui-design.md](../superpowers/
 | Step | Viswesh | P1 | P2 | P3 + P4 |
 | --- | --- | --- | --- | --- |
 | 1 | Frame reader at 5 fps, metrics | Baby crying (needs only audio, starts now) | Face gallery + SFace matching on photos | `zones.py` + zone drawing tool, hand-made-object tests |
-| 2 | Motion + regions + YOLOX detector | Fire model choice + dataset + training | Plate OCR on still photos of plates | Intrusion + restricted area logic |
+| 2 | Motion + regions + YOLOX detector | Tune vacancy and crying inputs | Plate OCR on still photos of plates | Occupancy counts and fall pose features |
 | 3 | Tracker + `TrackedObject` + `on_objects` hook | Lights-on detector for power_when_absent | Per-track voting (faces, plates) | Occupancy counts, fall pose features |
 | 4 | Tampering plugin; camera hookup | Plug into tracked objects | Plug into tracked objects | Plug into tracked objects, tune on real clips |
 | 5 | Performance pass with all plugins on | Tune thresholds on clips | Tune thresholds on clips | Tune thresholds on clips |
@@ -159,5 +155,4 @@ On top of the checklist in [../TEAM_GUIDE.md](../TEAM_GUIDE.md) section 6:
   results (hits, misses, false alarms) in your folder README.
 - **Speed:** your plugin's time per call is logged by the worker. Keep it under 30 ms on average
   (heavy models: under 100 ms, and only on objects).
-- **Fast response:** the event reaches `/api/cctv/events` within 2 s of the incident starting
-  (intrusion and fire: within 1 s once the pipeline runs at 5 fps).
+- **Fast response:** the event reaches `/api/cctv/events` within 2 s of the incident starting.

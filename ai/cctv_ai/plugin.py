@@ -23,7 +23,7 @@ class Event:
 
     camera: str
     use_case: str  # must match the plugin's use_case
-    label: str  # e.g. "person", "smoke", "fall"
+    label: str  # e.g. "known_person", "plate", "fall"
     confidence: float  # 0..1
     time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     snapshot: Optional[str] = None  # optional path or URL of an image

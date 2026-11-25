@@ -1,8 +1,6 @@
-# Plan: P1 Mohanraj (fire and smoke, electricity when nobody is there, baby crying)
+# Plan: P1 Mohanraj (electricity when nobody is there, baby crying)
 
-Three use cases, one theme: **"something is on that shouldn't be"** (a fire, the lights, a crying
-baby nobody is attending to). Start with baby crying: it needs only audio, so you can finish it
-before the shared detector exists.
+Two use cases: baby-cry detection from audio, and energy saving when a configured zone is empty. Start with baby crying: it can be built independently of the shared detector.
 
 Read first: [../how-frigate-works.md](../how-frigate-works.md) sections 3 (motion), 9 (median score)
 and 11 (audio).
@@ -12,10 +10,8 @@ and 11 (audio).
 | Use case | Model | Licence | Libraries |
 | --- | --- | --- | --- |
 | Baby crying | YAMNet (521 sound classes), converted to ONNX | Apache 2.0 | `onnxruntime`, `numpy`, `tf2onnx` (one-off conversion) |
-| Fire and smoke | YOLOX-Nano or YOLOX-Tiny trained on a fire/smoke dataset | Apache 2.0 (model code); check the dataset's licence | YOLOX repo for training (Colab/Kaggle GPU), `onnxruntime` to run |
 | Electricity | No model: tracked people + image brightness rules | — | `opencv-python`, the zone helper |
 
-No Ultralytics fire models (AGPL), see rule 12 in the team guide.
 
 ## 1. Baby crying (`ai/plugins/baby_crying`)
 
@@ -51,44 +47,7 @@ on_audio(1 s int16 @ 16 kHz) ─> RMS gate ─> YAMNet (15 600 samples) ─> "Ba
    commit) and a recording near the real camera; camera microphones sound very different from clean
    datasets.
 
-### Later
-- Fire alarm sounds: YAMNet also has `Smoke detector, smoke alarm` and `Fire alarm`. When the fire
-  plugin wants them, move the YAMNet code to `ai/cctv_ai/audio_classifier.py` (shared-code PR,
-  Viswesh reviews) so YAMNet runs once per chunk for both plugins.
-
-## 2. Fire and smoke (`ai/plugins/fire`)
-
-Frigate only does fire by sound. Visual fire is our addition.
-
-### Architecture
-```
-on_frame (2 per second) ─> fire/smoke detector (YOLOX-Nano, 416) ─> per-region tracking by IoU
-      ─> median score over the last 10 checks ─> persists ≥ 3 s ─> one event per incident
-```
-Fire flickers and smoke drifts, so single frames are unreliable; the median and persistence rules
-(Frigate section 9) remove most false alarms (sunsets, red clothes, a lamp).
-
-### Steps
-1. Dataset: an open fire/smoke detection dataset such as D-Fire (check its licence and write it in
-   the folder README). Add 200–500 of your own **negative** frames from our cameras (lamps, red
-   objects, sunlight, a TV) as images with no boxes.
-2. Train YOLOX-Nano or YOLOX-Tiny with the official YOLOX repo (Apache 2.0) on Colab or Kaggle
-   GPU: two classes, `fire` and `smoke`, input 416. Export to ONNX with YOLOX's `export_onnx.py`.
-3. Post-process the same way as the shared detector (grid decode + NMS). Copy Viswesh's YOLOX
-   post-processing function once it lands; until then, YOLOX's `demo/ONNXRuntime` example shows it.
-4. In `on_frame()` at `interval = 0.5`:
-   - Run the model on the full frame (letterboxed). Fire is usually large; small distant fire can use
-     region crops later.
-   - Match boxes to the previous checks by IoU > 0.3 to follow the same fire.
-   - Keep the last 10 scores per fire (0 when missing), take the median.
-   - Raise `fire` or `smoke` when the median ≥ 0.6 and it has lasted ≥ 3 s.
-5. One event per incident; re-arm after 60 s with no fire. Put the box and a snapshot in the event.
-6. Cheap pre-check (optional, saves CPU): skip the model when the frame has no fire-coloured pixels
-   (HSV hue 0–35, high saturation and value) and no smoke-grey change since the last check.
-7. Test on fire videos (candles, a lighter, a fire video played on a phone in front of the camera),
-   and on negatives (red shirt, sunset, orange lamp). Record hits and false alarms in the README.
-
-## 3. Electricity used when nobody is there (`ai/plugins/power_when_absent`)
+## 2. Electricity used when nobody is there (`ai/plugins/power_when_absent`)
 
 Frigate doesn't have this. Rule: **power is on AND no person for N minutes → one event.**
 
@@ -123,5 +82,4 @@ on_frame   ─> "power on?" signals: lights on, screen on, fan moving (per-camer
 ## Done when
 
 - Baby crying: one event per crying episode on test recordings, none for TV talking or silence.
-- Fire: catches the candle/lighter/phone-video tests within 3–5 s, no alarm on red objects or lamps.
 - Electricity: event after N empty minutes with lights on; no event while someone sits still.

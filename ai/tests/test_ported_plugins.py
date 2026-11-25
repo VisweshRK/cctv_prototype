@@ -4,7 +4,6 @@ import cv2
 import numpy as np
 
 from cctv_ai.objects import TrackedObject
-from plugins.fire import Plugin as Fire
 from plugins.baby_crying import Plugin as Baby
 from plugins.power_when_absent import Plugin as Power
 
@@ -12,20 +11,9 @@ class PortedPluginsTest(unittest.TestCase):
     def setUp(self):
         self.now = datetime.now(timezone.utc)
 
-    def test_fire_persists_and_emits_frontend_fields(self):
-        plugin = Fire(); plugin.setup(["cam1"])
-        frame = np.zeros((240, 320, 3), np.uint8)
-        frame[80:150, 120:190] = (20, 180, 255)
-        events = []
-        for i in range(3):
-            events += plugin.on_frame("cam1", frame, self.now + timedelta(seconds=i))
-        self.assertTrue(events)
-        self.assertEqual(events[-1].use_case, "fire")
-        self.assertIn("box", events[-1].data)
-        self.assertIn("detail", events[-1].data)
-
     def test_baby_crying_harmonic_fallback_starts_and_ends_episode(self):
         plugin = Baby(); plugin.setup(["cam1"])
+        plugin.session = None  # exercise the fallback even when local model assets are installed
         t = np.arange(16000) / 16000.0
         samples = (0.8 * np.sin(2 * np.pi * 450 * t)).astype(np.float32)
         first = plugin.on_audio("cam1", samples, 16000, self.now)
@@ -36,6 +24,21 @@ class PortedPluginsTest(unittest.TestCase):
         for seconds in range(1, 10):
             ended += plugin.on_audio("cam1", silence, 16000, self.now + timedelta(seconds=seconds))
         self.assertTrue(any(e.label == "crying_ended" for e in ended))
+
+    def test_yamnet_scores_baby_cry_not_whimper(self):
+        plugin = Baby()
+
+        class Session:
+            def run(self, _outputs, _inputs):
+                scores = np.zeros((1, 521), dtype=np.float32)
+                scores[0, 20] = 0.37  # Baby cry, infant cry
+                scores[0, 21] = 0.95  # Whimper
+                return [scores]
+
+        plugin.session = Session()
+        plugin.input_name = "waveform"
+        score, _ = plugin._score(np.ones(16000, dtype=np.int16), 16000)
+        self.assertAlmostEqual(score, 0.37, places=5)
 
     def test_power_requires_empty_room_and_rearms(self):
         plugin = Power(); plugin.empty_minutes = 0.01; plugin.hysteresis = 0

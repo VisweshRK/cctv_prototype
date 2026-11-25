@@ -1,18 +1,4 @@
-"""Vehicle + licence plate recognition: read plates at the gate
-(plan: docs/plans/p2-krithick.md).
-
-OCR: RapidOCR (PaddleOCR det/cls/rec ONNX, Apache 2.0, models bundled in the
-pip package). Matching: rapidfuzz (MIT). One event per vehicle track, with
-the plate confirmed by several agreeing reads.
-
-Today's worker calls on_frame() with the whole frame, so this plugin runs in
-a demo mode: OCR on the full frame (throttled), plate-shaped text boxes only,
-reads clustered per camera over the last max_reads frames. When Viswesh's
-pipeline lands (TrackedObject + on_objects, see docs/plans/README.md), set
-needs = {"objects"} and the real path below takes over: reads per vehicle
-track, event when the plate is confirmed by >= confirm_reads reads or the
-track ends - exactly like Frigate.
-"""
+"""Vehicle and plate recognition using vehicle-candidate crops from the shared detector."""
 
 from __future__ import annotations
 
@@ -27,6 +13,8 @@ import yaml
 from rapidfuzz.distance import Levenshtein
 
 from cctv_ai.plugin import Event, Plugin as Base
+from cctv_ai.objects import TrackedObject
+from cctv_ai.tracker import box_iou
 
 from . import plates
 from .clustering import PlateRead, best_plate
@@ -42,8 +30,8 @@ def repo_root() -> Path:
 class Plugin(Base):
     use_case = "vehicle_lpr"
     enabled = True  # stays silent until the OCR models are present
-    needs = {"video"}  # switch to {"objects"} when the shared tracker lands
-    interval = 1.0
+    needs = {"objects"}
+    interval = 2.0
     heavy = True  # the pipeline should run this plugin on its own thread
 
     # tuning (see docs/plans/p2-krithick.md)
@@ -51,7 +39,7 @@ class Plugin(Base):
     min_read_confidence = 0.80  # RapidOCR avg char confidence; 0.85 dropped clean renders too
     min_plate_length = plates.MIN_PLATE_LENGTH
     cluster_threshold = 0.85  # Jaro-Winkler similarity to group reads
-    confirm_reads = 3  # agreeing reads before the plate is announced
+    confirm_reads = 1  # one high-confidence, format-valid crop read is enough
     max_reads = 25  # per track: last fps x 5 reads (5 s at 5 fps)
     min_read_interval = 1.0  # demo mode: seconds between full-frame OCR runs
     duplicate_window = 60.0  # demo mode: no repeated event for the same plate
@@ -65,6 +53,10 @@ class Plugin(Base):
         self.announced: dict[str, dict[str, float]] = {c: {} for c in cameras}
         self.already_read: set[str] = set()  # object mode: stationary, read once
         self.last_ocr: dict[str, float] = {c: 0.0 for c in cameras}
+        self.vehicle_tracker = VehicleObjectTracker()
+
+    def track_candidates(self, camera: str, detections: list[dict], ts: datetime):
+        return self.vehicle_tracker.update(camera, detections, ts)
 
     def _load_known_plates(self) -> dict[str, list[str]]:
         path = repo_root() / "data" / "known_plates.yaml"
@@ -116,6 +108,16 @@ class Plugin(Base):
         log.info("%s: plate %s conf %.2f from %d reads", camera, plate, conf, reads)
         return event
 
+    def _announce(self, camera: str, result, vehicle: str | None = None) -> Event | None:
+        if result is None or result[2] < self.confirm_reads:
+            return None
+        plate, conf, agreeing = result
+        now = time.monotonic()
+        if now - self.announced.setdefault(camera, {}).get(plate, 0.0) < self.duplicate_window:
+            return None
+        self.announced[camera][plate] = now
+        return self._event(camera, plate, conf, agreeing, vehicle=vehicle)
+
     # ---- demo path (whole frame, per camera, no tracks) ------------------
 
     def on_frame(self, camera: str, frame: np.ndarray, ts: datetime) -> list[Event]:
@@ -158,9 +160,8 @@ class Plugin(Base):
                 continue
             result = best_plate(list(self.reads[key]), self.cluster_threshold)
             del self.reads[key]
-            if result and result[2] >= 1:
-                events.append(self._event(camera, result[0], result[1], result[2],
-                                          vehicle=obj.label))
+            if event := self._announce(camera, result, vehicle=obj.label):
+                events.append(event)
 
         for obj in objects:
             if obj.label not in plates.VEHICLE_LABELS or not obj.true_positive:
@@ -184,6 +185,69 @@ class Plugin(Base):
             result = best_plate(list(self.reads[key]), self.cluster_threshold)
             if result and result[2] >= self.confirm_reads:
                 self.already_read.add(key)
-                events.append(self._event(camera, result[0], result[1], result[2],
-                                          vehicle=obj.label))
+                if event := self._announce(camera, result, vehicle=obj.label):
+                    events.append(event)
         return events
+
+
+class VehicleObjectTracker:
+    """Short-lived IoU tracks that let OCR run only on detected vehicle crops."""
+
+    def __init__(self, max_missed: int = 10, threshold: float = 0.18):
+        self.max_missed = max_missed
+        self.threshold = threshold
+        self.next_id = 1
+        self.tracks: dict[str, dict[str, dict]] = {}
+
+    def update(self, camera: str, detections: list[dict], ts: datetime):
+        tracks = self.tracks.setdefault(camera, {})
+        candidates = [d for d in detections if d.get("label") in plates.VEHICLE_LABELS]
+        assigned: set[str] = set()
+        active: list[TrackedObject] = []
+
+        for detection in candidates:
+            box = tuple(map(int, detection["box"]))
+            score = float(detection["score"])
+            label = str(detection["label"])
+            best_id, best_overlap = None, 0.0
+            for track_id, track in tracks.items():
+                if track_id in assigned:
+                    continue
+                overlap = box_iou(track["box"], box)
+                if overlap > best_overlap:
+                    best_id, best_overlap = track_id, overlap
+            if best_id is None or best_overlap < self.threshold:
+                best_id = f"{camera}-vehicle{self.next_id}"
+                self.next_id += 1
+                tracks[best_id] = {"box": box, "label": label, "score": score, "missed": 0,
+                                   "motionless": 0, "history": [box], "first_seen": ts}
+            else:
+                track = tracks[best_id]
+                track["motionless"] = track["motionless"] + 1 if box_iou(track["box"], box) >= 0.8 else 0
+                track.update(box=box, label=label, score=score, missed=0)
+                track["history"].append(box)
+                track["history"] = track["history"][-25:]
+            assigned.add(best_id)
+            track = tracks[best_id]
+            active.append(TrackedObject(
+                id=best_id, label=label, box=box, score=score, median_score=score,
+                true_positive=score >= 0.4, stationary=track["motionless"] >= 10,
+                motionless_count=track["motionless"], first_seen=track["first_seen"],
+                last_seen=ts, history=list(track["history"]),
+            ))
+
+        ended: list[TrackedObject] = []
+        for track_id, track in list(tracks.items()):
+            if track_id in assigned:
+                continue
+            track["missed"] += 1
+            if track["missed"] >= self.max_missed:
+                ended.append(TrackedObject(
+                    id=track_id, label=track["label"], box=track["box"], score=track["score"],
+                    median_score=track["score"], true_positive=True,
+                    stationary=track["motionless"] >= 10,
+                    motionless_count=track["motionless"], first_seen=track["first_seen"],
+                    last_seen=ts, history=list(track["history"]),
+                ))
+                del tracks[track_id]
+        return active, ended

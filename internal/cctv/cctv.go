@@ -58,9 +58,6 @@ func Init() {
 		cfg.Mod.SnapshotsDir = "data/snapshots"
 	}
 	sc := &cfg.Mod.Siren
-	if len(sc.UseCases) == 0 {
-		sc.UseCases = []string{"intrusion", "restricted_area", "fire"}
-	}
 	if sc.Max <= 0 {
 		sc.Max = 3 * time.Minute
 	}
@@ -95,6 +92,9 @@ func Init() {
 	api.HandleFunc("api/cctv/events/stream", events.apiStream)
 	api.HandleFunc("api/cctv/events/ack", events.apiAck)
 	api.HandleFunc("api/cctv/snapshot", snaps.apiSnapshot)
+	api.HandleFunc("api/cctv/health", apiHealth)
+	api.HandleFunc("api/cctv/faces", faceGallery)
+	api.HandleFunc("api/cctv/faces/rebuild", rebuildFaceGallery)
 
 	w := newWatcher(cfg.Mod.Cameras, cfg.Mod.Interval, cfg.Mod.OfflineAfter, events)
 	w.describe(cfg.Mod.Names, cfg.Mod.UseCases)

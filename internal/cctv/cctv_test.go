@@ -65,9 +65,9 @@ func TestEventsAPI(t *testing.T) {
 		return w
 	}
 
-	w := post(`{"camera":"cam1","use_case":"intrusion","label":"person","confidence":0.9}`)
+	w := post(`{"camera":"cam1","use_case":"tampering","label":"person","confidence":0.9}`)
 	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
-	w = post(`{"camera":"cam2","use_case":"fire","label":"smoke","confidence":0.5}`)
+	w = post(`{"camera":"cam2","use_case":"baby_crying","label":"crying","confidence":0.5}`)
 	require.Equal(t, http.StatusCreated, w.Code)
 
 	require.Equal(t, http.StatusBadRequest, post(`{"camera":"cam1"}`).Code)
@@ -81,7 +81,7 @@ func TestEventsAPI(t *testing.T) {
 	var got []Event
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	require.Len(t, got, 1)
-	require.Equal(t, "intrusion", got[0].UseCase)
+	require.Equal(t, "tampering", got[0].UseCase)
 	require.Equal(t, int64(1), got[0].ID)
 	require.False(t, got[0].Time.IsZero())
 
@@ -97,7 +97,7 @@ func TestEventsAPI(t *testing.T) {
 func TestPostIgnoresServerOwnedFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "events.jsonl")
 	s := newEventStore(path, 10)
-	w := postEvent(s, `{"id":77,"camera":"cam1","use_case":"intrusion","label":"person","confidence":0.9,`+
+	w := postEvent(s, `{"id":77,"camera":"cam1","use_case":"tampering","label":"person","confidence":0.9,`+
 		`"siren":"ringing","acknowledged_at":"2026-10-19T10:00:00Z","snapshot":"https://example.invalid/x.jpg"}`)
 	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
 
@@ -116,12 +116,12 @@ func TestPostRejectsLargeData(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "events.jsonl")
 	s := newEventStore(path, 10)
 	big := strings.Repeat("x", 64<<10)
-	w := postEvent(s, `{"camera":"cam1","use_case":"intrusion","label":"person","confidence":0.9,"data":{"detail":"`+big+`"}}`)
+	w := postEvent(s, `{"camera":"cam1","use_case":"tampering","label":"person","confidence":0.9,"data":{"detail":"`+big+`"}}`)
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	require.Contains(t, w.Body.String(), "data must be at most 64 KiB")
 	require.Empty(t, s.list("", "", 10))
 
-	w = postEvent(s, `{"camera":"cam1","use_case":"intrusion","label":"person","confidence":0.9,"data":{"detail":"`+big[:60<<10]+`"}}`)
+	w = postEvent(s, `{"camera":"cam1","use_case":"tampering","label":"person","confidence":0.9,"data":{"detail":"`+big[:60<<10]+`"}}`)
 	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
 	require.Len(t, newEventStore(path, 10).list("", "", 10), 1)
 }
@@ -142,7 +142,7 @@ func TestUpdatePublishesAndPersists(t *testing.T) {
 	s := newEventStore(path, 10)
 	ch, cancel := s.subscribe()
 	defer cancel()
-	e, _ := s.add(Event{Camera: "cam1", UseCase: "intrusion", Label: "person", Confidence: 0.9})
+	e, _ := s.add(Event{Camera: "cam1", UseCase: "tampering", Label: "person", Confidence: 0.9})
 	require.Equal(t, "alert", (<-ch).Type)
 	got, ok := s.update(e.ID, func(e *Event) { e.Snapshot = "api/cctv/snapshot?id=1" })
 	require.True(t, ok)
@@ -159,7 +159,7 @@ func TestUpdatePublishesAndPersists(t *testing.T) {
 func TestLoadResetsRingingAndAppliesUpdates(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "events.jsonl")
 	s := newEventStore(path, 10)
-	e, _ := s.add(Event{Camera: "cam1", UseCase: "fire", Label: "smoke", Confidence: 0.8})
+	e, _ := s.add(Event{Camera: "cam1", UseCase: "baby_crying", Label: "crying", Confidence: 0.8})
 	s.update(e.ID, func(e *Event) { e.Siren = sirenRinging })
 	got, _ := newEventStore(path, 10).get(e.ID)
 	require.Equal(t, sirenStopped, got.Siren)
@@ -319,7 +319,7 @@ func TestWatcherReportsRuntimeDropAndRestore(t *testing.T) {
 
 func TestStatusIncludesPlaceAndUseCases(t *testing.T) {
 	w := newWatcher([]string{"cam1"}, time.Second, time.Second, newEventStore("", 10))
-	useCases := map[string][]string{"cam1": {"intrusion"}}
+	useCases := map[string][]string{"cam1": {"tampering"}}
 	w.describe(map[string]string{"cam1": "Front corridor"}, useCases)
 	useCases["cam1"][0] = "changed" // the watcher keeps its own copy
 
@@ -331,7 +331,7 @@ func TestStatusIncludesPlaceAndUseCases(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
 	require.Len(t, out, 1)
 	require.Equal(t, "Front corridor", out[0]["place"])
-	require.Equal(t, []any{"intrusion"}, out[0]["use_cases"])
+	require.Equal(t, []any{"tampering"}, out[0]["use_cases"])
 }
 
 func TestStreamSendsAlertsAndPings(t *testing.T) {
@@ -386,14 +386,14 @@ func TestStreamSendsAlertsAndPings(t *testing.T) {
 
 	require.Equal(t, ": hello", next())
 
-	_, err = s.add(Event{Camera: "cam1", UseCase: "intrusion", Label: "person", Confidence: 0.9})
+	_, err = s.add(Event{Camera: "cam1", UseCase: "tampering", Label: "person", Confidence: 0.9})
 	require.NoError(t, err)
 	require.Equal(t, "event: alert", next())
 	data := next()
 	require.True(t, strings.HasPrefix(data, `data: {"id":1,`), data)
 	var e Event
 	require.NoError(t, json.Unmarshal([]byte(strings.TrimPrefix(data, "data: ")), &e))
-	require.Equal(t, "intrusion", e.UseCase)
+	require.Equal(t, "tampering", e.UseCase)
 
 	s.update(1, func(e *Event) { e.Siren = sirenUnavailable })
 	require.Equal(t, "event: update", next())
@@ -423,8 +423,8 @@ func TestStreamSendsAlertsAndPings(t *testing.T) {
 func TestAckEndpoint(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "events.jsonl")
 	s := newEventStore(path, 10)
-	e1, _ := s.add(Event{Camera: "cam1", UseCase: "intrusion", Label: "person", Confidence: 0.9})
-	_, _ = s.add(Event{Camera: "cam1", UseCase: "intrusion", Label: "person", Confidence: 0.8})
+	e1, _ := s.add(Event{Camera: "cam1", UseCase: "tampering", Label: "person", Confidence: 0.9})
+	_, _ = s.add(Event{Camera: "cam1", UseCase: "tampering", Label: "person", Confidence: 0.8})
 	s.update(e1.ID, func(e *Event) { e.Siren = sirenRinging })
 	var acked []int64
 	s.onAck = func(e Event) { acked = append(acked, e.ID) }
@@ -513,7 +513,7 @@ func TestSnapshotURLIsUniquePerStoreLifetime(t *testing.T) {
 		p := newSnapshots(t.TempDir(), grab, s)
 		s.onAdd = p.handle
 		at := time.Date(2026, 10, 19, 10, 0, i, 0, time.UTC)
-		_, err := s.add(Event{Camera: "cam1", UseCase: "intrusion", Label: "person", Confidence: 1, Time: at})
+		_, err := s.add(Event{Camera: "cam1", UseCase: "tampering", Label: "person", Confidence: 1, Time: at})
 		require.NoError(t, err)
 		require.Eventually(t, func() bool {
 			e, ok := s.get(1)
@@ -536,7 +536,7 @@ func TestSnapshotFromPostedImage(t *testing.T) {
 	s.onAdd = p.handle
 
 	jpeg := []byte{0xFF, 0xD8, 0xFF, 0xD9}
-	body := `{"camera":"cam1","use_case":"intrusion","label":"person","confidence":0.9,"image":"` +
+	body := `{"camera":"cam1","use_case":"tampering","label":"person","confidence":0.9,"image":"` +
 		base64.StdEncoding.EncodeToString(jpeg) + `"}`
 	w := postEvent(s, body)
 	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
@@ -568,7 +568,7 @@ func TestSnapshotGrabbedWhenNoImage(t *testing.T) {
 	}, s)
 	s.onAdd = p.handle
 
-	w := postEvent(s, `{"camera":"cam2","use_case":"intrusion","label":"person","confidence":0.9}`)
+	w := postEvent(s, `{"camera":"cam2","use_case":"tampering","label":"person","confidence":0.9}`)
 	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
 
 	require.Eventually(t, func() bool {
@@ -594,7 +594,7 @@ func TestSnapshotGrabFailureLeavesEventWithoutSnapshot(t *testing.T) {
 	}, s)
 	s.onAdd = p.handle
 
-	w := postEvent(s, `{"camera":"cam1","use_case":"intrusion","label":"person","confidence":0.9}`)
+	w := postEvent(s, `{"camera":"cam1","use_case":"tampering","label":"person","confidence":0.9}`)
 	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
 
 	time.Sleep(200 * time.Millisecond)
@@ -635,7 +635,7 @@ func TestSnapshotEndpointRejectsBadIDs(t *testing.T) {
 func TestPostImageRejectsBadData(t *testing.T) {
 	s := newEventStore("", 10)
 	for _, image := range []string{"%%%", base64.StdEncoding.EncodeToString([]byte("hello"))} {
-		body := `{"camera":"cam1","use_case":"intrusion","label":"person","confidence":0.9,"image":"` + image + `"}`
+		body := `{"camera":"cam1","use_case":"tampering","label":"person","confidence":0.9,"image":"` + image + `"}`
 		w := postEvent(s, body)
 		require.Equal(t, http.StatusBadRequest, w.Code, image)
 		require.Contains(t, w.Body.String(), "image must be a base64 JPEG", image)
@@ -702,7 +702,7 @@ func newTestSiren(p *fakePlayer) (*eventStore, *siren) {
 // newTestSirenMax is newTestSiren with a store that keeps max events.
 func newTestSirenMax(p *fakePlayer, max int) (*eventStore, *siren) {
 	s := newEventStore("", max)
-	sir := newSiren(p.play, testSirenSrc, []string{"intrusion", "restricted_area", "fire"}, 100*time.Millisecond, s)
+	sir := newSiren(p.play, testSirenSrc, []string{"tampering", "baby_crying"}, 100*time.Millisecond, s)
 	s.onAdd = func(e Event, _ []byte) { sir.onEvent(e) }
 	return s, sir
 }
@@ -732,11 +732,11 @@ func TestSirenRingsUntilAck(t *testing.T) {
 	p := &fakePlayer{}
 	s, sir := newTestSiren(p)
 
-	e1 := addAlert(t, s, "cam1", "intrusion")
+	e1 := addAlert(t, s, "cam1", "tampering")
 	require.Equal(t, [][2]string{{"cam1", testSirenSrc}}, p.got())
 	require.Equal(t, sirenRinging, sirenOf(t, s, e1.ID))
 
-	e2 := addAlert(t, s, "cam1", "intrusion")
+	e2 := addAlert(t, s, "cam1", "tampering")
 	require.Len(t, p.got(), 1) // already ringing: no new call
 	require.Equal(t, sirenRinging, sirenOf(t, s, e2.ID))
 
@@ -758,7 +758,7 @@ func TestSirenOnlyForSirenUseCases(t *testing.T) {
 	require.Empty(t, sirenOf(t, s, e.ID))
 
 	// an ack of a non-siren event must not disturb a ringing camera
-	e2 := addAlert(t, s, "cam1", "intrusion")
+	e2 := addAlert(t, s, "cam1", "tampering")
 	ackAlert(t, s, sir, e.ID)
 	require.Len(t, p.got(), 1)
 	require.Equal(t, sirenRinging, sirenOf(t, s, e2.ID))
@@ -768,7 +768,7 @@ func TestSirenOnlyOnCameraThatSawIt(t *testing.T) {
 	p := &fakePlayer{}
 	s, _ := newTestSiren(p)
 
-	addAlert(t, s, "cam2", "fire")
+	addAlert(t, s, "cam2", "baby_crying")
 	require.Equal(t, [][2]string{{"cam2", testSirenSrc}}, p.got())
 }
 
@@ -793,8 +793,8 @@ func TestSirenSharedSpeaker(t *testing.T) {
 	s, sir := newTestSiren(p)
 	sir.speaker = func(string) string { return "dual" } // two lenses, one speaker
 
-	e1 := addAlert(t, s, "cam1", "intrusion")
-	e2 := addAlert(t, s, "cam2", "intrusion")
+	e1 := addAlert(t, s, "cam1", "tampering")
+	e2 := addAlert(t, s, "cam2", "tampering")
 	require.Equal(t, [][2]string{{"dual", testSirenSrc}}, p.got())
 	require.Equal(t, sirenRinging, sirenOf(t, s, e2.ID))
 
@@ -809,11 +809,11 @@ func TestSirenCutOffAndStaysQuiet(t *testing.T) {
 	p := &fakePlayer{}
 	s, sir := newTestSiren(p)
 
-	e1 := addAlert(t, s, "cam1", "intrusion")
+	e1 := addAlert(t, s, "cam1", "tampering")
 	requireCutOff(t, p, s, e1.ID)
 	calls := p.got()
 
-	e2 := addAlert(t, s, "cam1", "intrusion") // e1 still unacknowledged: stay quiet
+	e2 := addAlert(t, s, "cam1", "tampering") // e1 still unacknowledged: stay quiet
 	require.Len(t, p.got(), len(calls))
 	require.Equal(t, sirenStopped, sirenOf(t, s, e2.ID))
 
@@ -821,7 +821,7 @@ func TestSirenCutOffAndStaysQuiet(t *testing.T) {
 	ackAlert(t, s, sir, e2.ID)
 	require.Len(t, p.got(), len(calls)) // nothing was playing: no stop call
 
-	addAlert(t, s, "cam1", "intrusion")
+	addAlert(t, s, "cam1", "tampering")
 	calls = p.got()
 	require.Equal(t, [2]string{"cam1", testSirenSrc}, calls[len(calls)-1])
 }
@@ -830,9 +830,9 @@ func TestSirenUnavailable(t *testing.T) {
 	p := &fakePlayer{fail: true}
 	s, _ := newTestSiren(p)
 
-	e1 := addAlert(t, s, "cam1", "intrusion")
+	e1 := addAlert(t, s, "cam1", "tampering")
 	require.Equal(t, sirenUnavailable, sirenOf(t, s, e1.ID))
-	e2 := addAlert(t, s, "cam1", "restricted_area")
+	e2 := addAlert(t, s, "cam1", "tampering")
 	require.Equal(t, sirenUnavailable, sirenOf(t, s, e2.ID))
 }
 
@@ -872,11 +872,11 @@ func TestSirenEventDuringStartGetsItsOutcome(t *testing.T) {
 
 		done := make(chan Event)
 		go func() {
-			e, _ := s.add(Event{Camera: "cam1", UseCase: "intrusion", Label: "person", Confidence: 0.9})
+			e, _ := s.add(Event{Camera: "cam1", UseCase: "tampering", Label: "person", Confidence: 0.9})
 			done <- e
 		}()
 		<-entered
-		e2 := addAlert(t, s, "cam1", "intrusion") // returns at once: a start is in flight
+		e2 := addAlert(t, s, "cam1", "tampering") // returns at once: a start is in flight
 		close(release)
 		e1 := <-done
 
@@ -899,11 +899,11 @@ func TestSirenAckWhilePlayInFlight(t *testing.T) {
 
 	done := make(chan Event)
 	go func() {
-		e, _ := s.add(Event{Camera: "cam1", UseCase: "intrusion", Label: "person", Confidence: 0.9})
+		e, _ := s.add(Event{Camera: "cam1", UseCase: "tampering", Label: "person", Confidence: 0.9})
 		done <- e
 	}()
 	<-entered
-	e2 := addAlert(t, s, "cam1", "fire")
+	e2 := addAlert(t, s, "cam1", "baby_crying")
 	ackAlert(t, s, sir, 1)
 	ackAlert(t, s, sir, e2.ID) // both return at once: the start in flight will stop it
 	close(release)
@@ -922,7 +922,7 @@ func TestSirenAckWhilePlayInFlight(t *testing.T) {
 func TestSirenEventsDuringStopJoinTheRestart(t *testing.T) {
 	p := &fakePlayer{}
 	s, sir := newTestSiren(p)
-	e0 := addAlert(t, s, "cam1", "intrusion")
+	e0 := addAlert(t, s, "cam1", "tampering")
 
 	entered, release := make(chan struct{}), make(chan struct{})
 	p.mu.Lock()
@@ -943,8 +943,8 @@ func TestSirenEventsDuringStopJoinTheRestart(t *testing.T) {
 		close(done)
 	}()
 	<-entered
-	e1 := addAlert(t, s, "cam1", "intrusion")
-	e2 := addAlert(t, s, "cam1", "fire")
+	e1 := addAlert(t, s, "cam1", "tampering")
+	e2 := addAlert(t, s, "cam1", "baby_crying")
 	close(release)
 	<-done
 
@@ -959,14 +959,14 @@ func TestSirenForgetsTrimmedEvents(t *testing.T) {
 	p := &fakePlayer{}
 	s, _ := newTestSirenMax(p, 2)
 
-	e1 := addAlert(t, s, "cam1", "intrusion")
+	e1 := addAlert(t, s, "cam1", "tampering")
 	requireCutOff(t, p, s, e1.ID)
 	addAlert(t, s, "cam1", "fall")
 	addAlert(t, s, "cam1", "fall") // e1 is trimmed
 	_, ok := s.get(e1.ID)
 	require.False(t, ok)
 
-	e2 := addAlert(t, s, "cam1", "intrusion")
+	e2 := addAlert(t, s, "cam1", "tampering")
 	calls := p.got()
 	require.Equal(t, [2]string{"cam1", testSirenSrc}, calls[len(calls)-1])
 	require.Equal(t, sirenRinging, sirenOf(t, s, e2.ID))
@@ -977,7 +977,7 @@ func TestSirenStoppedByAckEndpoint(t *testing.T) {
 	p := &fakePlayer{}
 	s, sir := newTestSiren(p)
 	s.onAck = sir.onAck
-	e := addAlert(t, s, "cam1", "intrusion")
+	e := addAlert(t, s, "cam1", "tampering")
 
 	r := httptest.NewRequest("POST", "/api/cctv/events/ack", strings.NewReader(`{"id":`+strconv.FormatInt(e.ID, 10)+`}`))
 	w := httptest.NewRecorder()

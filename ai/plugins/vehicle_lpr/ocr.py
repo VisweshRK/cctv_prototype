@@ -59,7 +59,9 @@ class PlateOCR:
             log.warning("rapidocr-onnxruntime not installed (see ai/requirements.txt)")
             return False
         try:
-            self.engine = RapidOCR()
+            # The package defaults to -1 (all host cores) for each of three
+            # ONNX sessions. Cap each session so LPR cannot starve live video.
+            self.engine = RapidOCR(intra_op_num_threads=1, inter_op_num_threads=1)
             return True
         except Exception:
             log.exception("cannot start RapidOCR")

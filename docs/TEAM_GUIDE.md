@@ -5,7 +5,8 @@ the rules that keep us from breaking each other's work.
 
 ## 1. What we're building
 
-A smart CCTV system for two Q-Tech Wi-Fi cameras that detects 10 kinds of incidents.
+A smart CCTV prototype for two Q-Tech Wi-Fi cameras with seven selected use cases: fall, baby crying,
+face recognition, licence-plate recognition, camera tampering, zone occupancy, and energy saving.
 
 ```
 cameras ──> go2rtc (Go) ──frames/audio──> AI worker (Python) ──events──> go2rtc API ──> live view + event list
@@ -16,7 +17,7 @@ cameras ──> go2rtc (Go) ──frames/audio──> AI worker (Python) ──e
 - **The AI worker** (Python, `ai/`) captures the latest RTSP frame per camera, shares it with use-case
   plugins, and drops stale frames instead of allowing latency to grow. **Your job is one plugin.**
 - A plugin looks at a frame (or 1 s of sound) and returns events like
-  `{"camera": "cam1", "use_case": "fire", "label": "smoke", "confidence": 0.8}`.
+  `{"camera": "cam1", "use_case": "tampering", "label": "lens_covered", "confidence": 0.8}`.
 
 You don't need to touch Go. You don't need a camera to start (see step 3).
 
@@ -82,35 +83,31 @@ macOS/Linux: same steps with your package manager. Use `.venv/bin/python` and bu
    ```bash
    .\go2rtc.exe
    ```
-4. In a second terminal, run the worker with the example plugin:
+4. In a second terminal, list and run the seven enabled use cases:
    ```bash
    cd ai
+   .venv\Scripts\python -m cctv_ai.worker --list
    .venv\Scripts\python -m cctv_ai.worker -v
    ```
-   You should see `event #N cam1/example_motion motion ...`. Events are listed at
-   http://localhost:1984/api/cctv/events and camera status at http://localhost:1984/api/cctv/status.
+   Events are listed at http://localhost:1984/api/cctv/events and camera status at http://localhost:1984/api/cctv/status.
 
 If that works, your setup is done.
 
 ## 4. Working on your use case
 
-| # | Use case | Folder | Owner | Depends on |
-| --- | --- | --- | --- | --- |
-| 1 | Intrusion | `ai/plugins/intrusion` | P3 Sanjay + P4 Kishore | shared detector (person) |
-| 2 | Tampering (covered/blurred/moved) | `ai/plugins/tampering` | Viswesh | nothing |
-| 3 | Face recognition | `ai/plugins/face_recognition` | P2 Krithick | nothing (own face model) |
-| 4 | Restricted area | `ai/plugins/restricted_area` | P3 Sanjay + P4 Kishore | shared detector (person) |
-| 5 | Fall detection | `ai/plugins/fall` | P3 Sanjay + P4 Kishore | shared detector (person) |
-| 6 | Occupancy | `ai/plugins/occupancy` | P3 Sanjay + P4 Kishore | shared detector (person) |
-| 7 | Electricity used when nobody is there | `ai/plugins/power_when_absent` | P1 Mohanraj | occupancy (start with "lights on?" from frame brightness) |
-| 8 | Fire and smoke | `ai/plugins/fire` | P1 Mohanraj | nothing (own model) |
-| 9 | Vehicle + licence plate | `ai/plugins/vehicle_lpr` | P2 Krithick | shared detector (car), then own plate model + OCR |
-| 10 | Baby crying | `ai/plugins/baby_crying` | P1 Mohanraj | camera audio |
+| # | Use case | Folder | Depends on |
+| --- | --- | --- | --- |
+| 1 | Fall detection | `ai/plugins/fall` | shared person detector and pose model |
+| 2 | Baby-cry detection | `ai/plugins/baby_crying` | camera audio |
+| 3 | Face detection and recognition | `ai/plugins/face_recognition` | YuNet/SFace models and enrolled gallery |
+| 4 | Licence-plate recognition | `ai/plugins/vehicle_lpr` | vehicle/plate candidate and OCR |
+| 5 | Camera tampering | `ai/plugins/tampering` | video/reference frame |
+| 6 | Zone occupancy | `ai/plugins/occupancy` | shared person detector and configured zones |
+| 7 | Energy saving when a zone is empty | `ai/plugins/power_when_absent` | shared person detector and appliance regions |
 
 Viswesh owns the shared code (worker, detector, go2rtc config, cameras) and helps P2 with models.
-The integration branch keeps all ten slots in main's structure. Fire, baby crying, and
-power-when-absent were ported from the unrelated platform branch to the `Plugin`/`Event` contract;
-do not import that branch's FastAPI, Vite, database, or `StandardAIEvent` architecture.
+The integration branch contains these seven selected cases. Fire/smoke is removed from this scope;
+do not import the unrelated platform branch's FastAPI, Vite, database, or `StandardAIEvent` architecture.
 
 **Shared detector: don't build your own person/car detector.** One detector runs once per frame for
 everyone (so the laptop runs one model, not five) and gives each plugin a list of boxes:

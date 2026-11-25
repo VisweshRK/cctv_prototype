@@ -2,39 +2,51 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
+import {readFileSync} from 'node:fs';
 
 import {
     USE_CASES, describe, areaOf, detailOf, boxOf, esc, snapshotState, snapshotSrc, sirenText,
-    Incidents, queueList, summarize, simulated, timelineHours, barFractions, parseTime,
+    Incidents, queueList, summarize, timelineHours, barFractions, parseTime,
     occupancyNow, energyWaste, TARIFF,
 } from '../cctv-logic.js';
 
 const ev = (fields) => ({
-    id: 1, camera: 'cam1', use_case: 'intrusion', label: 'person', confidence: 0.9,
+    id: 1, camera: 'cam1', use_case: 'tampering', label: 'person', confidence: 0.9,
     time: '2026-10-19T10:00:00Z', ...fields,
 });
 
-test('USE_CASES holds every use case of the spec table', () => {
-    for (const uc of ['intrusion', 'restricted_area', 'fire', 'fall', 'tampering', 'baby_crying',
-        'face_recognition', 'power_when_absent', 'occupancy', 'vehicle_lpr']) {
-        assert.ok(USE_CASES[uc], uc);
-    }
-    assert.equal(USE_CASES.fire.severity, 'critical');
-    assert.equal(USE_CASES.fire.siren, true);
-    assert.equal(USE_CASES.fall.siren, false);
+test('main registry contains exactly the seven integrated use cases', () => {
+    assert.deepEqual(Object.keys(USE_CASES).sort(), [
+        'baby_crying', 'face_recognition', 'fall', 'occupancy', 'power_when_absent',
+        'tampering', 'vehicle_lpr',
+    ]);
 });
 
-test('describe: intrusion is critical with siren and popup', () => {
+test('main dashboard has no demo-event button or emitter', () => {
+    const html = readFileSync(new URL('../cctv.html', import.meta.url), 'utf8');
+    const app = readFileSync(new URL('../cctv.js', import.meta.url), 'utf8');
+    assert.doesNotMatch(html, /simulate/i);
+    assert.doesNotMatch(app, /simulated|simulate/i);
+});
+
+test('main dashboard has face enrollment and worker readiness controls', () => {
+    const html = readFileSync(new URL('../cctv.html', import.meta.url), 'utf8');
+    const app = readFileSync(new URL('../cctv.js', import.meta.url), 'utf8');
+    assert.match(html, /id="faces-open"/);
+    assert.match(html, /id="faces-files"[^>]*multiple/);
+    assert.match(html, /id="faces-rebuild"/);
+    assert.match(html, /id="worker-health"/);
+    assert.match(app, /api\/cctv\/faces\/rebuild/);
+    assert.match(app, /api\/cctv\/health/);
+});
+
+test('describe: tampering shows as a high-severity popup without siren', () => {
     assert.deepEqual(describe(ev({})),
-        {severity: 'critical', title: 'Burglary alarm · intrusion', popup: true, siren: true});
+        {severity: 'high', title: 'Camera tampering / offline', popup: true, siren: false});
 });
 
 test('describe: rows of the spec table', () => {
     const d = (use_case, label = 'x') => describe(ev({use_case, label}));
-    assert.deepEqual(d('restricted_area'),
-        {severity: 'critical', title: 'Breach · restricted area', popup: true, siren: true});
-    assert.deepEqual(d('fire', 'smoke'),
-        {severity: 'critical', title: 'Fire / smoke detected', popup: true, siren: true});
     assert.deepEqual(d('fall', 'person'),
         {severity: 'high', title: 'Person fell', popup: true, siren: false});
     assert.deepEqual(d('baby_crying', 'crying'),
@@ -162,7 +174,7 @@ test('snapshotState: no waiting for cameras that went offline or came back', () 
     const t = Date.parse('2026-10-19T10:00:00Z');
     for (const label of ['camera_offline', 'camera_online']) {
         assert.equal(snapshotState(ev({use_case: 'tampering', label}), t + 1000), 'none', label);
-        assert.equal(snapshotState(ev({use_case: 'intrusion', label}), t + 1000), 'none', label); // any use case
+        assert.equal(snapshotState(ev({use_case: 'tampering', label}), t + 1000), 'none', label); // any use case
         // a snapshot that arrives anyway (an image POSTed with the event) still shows
         assert.equal(snapshotState(ev({label, snapshot: 'api/cctv/snapshot?id=1'}), t + 1000), 'ready', label);
     }
@@ -185,11 +197,11 @@ test('snapshotSrc: only the server snapshot URLs', () => {
 });
 
 test('sirenText', () => {
-    assert.equal(sirenText(ev({siren: 'ringing'})), 'ringing on cam1');
-    assert.equal(sirenText(ev({siren: 'unavailable'})), 'camera speaker not available');
-    assert.equal(sirenText(ev({siren: 'stopped'})), 'off');
-    assert.equal(sirenText(ev({})), 'off');
-    assert.equal(sirenText(ev({use_case: 'fire', camera: 'cam2', siren: 'ringing'})), 'ringing on cam2');
+    assert.equal(sirenText(ev({siren: 'ringing'})), ''); // sirens are disabled for the prototype use cases
+    assert.equal(sirenText(ev({siren: 'unavailable'})), '');
+    assert.equal(sirenText(ev({siren: 'stopped'})), '');
+    assert.equal(sirenText(ev({})), '');
+    assert.equal(sirenText(ev({use_case: 'baby_crying', camera: 'cam2', siren: 'ringing'})), '');
     assert.equal(sirenText(ev({use_case: 'fall', siren: 'ringing'})), ''); // no siren for this use case
     assert.equal(sirenText(ev({use_case: 'nope'})), '');
 });
@@ -199,7 +211,7 @@ test('queueList: after reload, unacked non-ringing popups are queued; only ringi
         ev({id: 6, use_case: 'occupancy', label: 'count'}), // feed only
         ev({id: 5, use_case: 'fall', label: 'fall'}), // popup, no siren
         ev({id: 4, siren: 'ringing'}),
-        ev({id: 3, use_case: 'fire', label: 'smoke', acknowledged_at: '2026-10-19T10:01:00Z'}),
+        ev({id: 3, use_case: 'baby_crying', label: 'crying', acknowledged_at: '2026-10-19T10:01:00Z'}),
         ev({id: 2, siren: 'stopped'}), // e.g. cut off at the siren maximum
         ev({id: 1, siren: 'unavailable', camera: 'cam2'}),
     ];
@@ -207,16 +219,16 @@ test('queueList: after reload, unacked non-ringing popups are queued; only ringi
     // no ringing event: everything unacked is queued, nothing pops
     const quiet = new Incidents();
     assert.equal(queueList(quiet, list.filter((e) => e.id !== 4)), false);
-    assert.deepEqual(quiet.ids('cam1|intrusion'), [2]);
-    assert.deepEqual(quiet.ids('cam2|intrusion'), [1]);
+    assert.deepEqual(quiet.ids('cam1|tampering'), [2]);
+    assert.deepEqual(quiet.ids('cam2|tampering'), [1]);
     assert.deepEqual(quiet.ids('cam1|fall'), [5]);
-    assert.deepEqual(quiet.ids('cam1|fire'), []);
+    assert.deepEqual(quiet.ids('cam1|baby_crying'), []);
     assert.equal(quiet.groupOf(6), null);
 
     // a ringing event pops, and its group is the current one
     const q = new Incidents();
     assert.equal(queueList(q, list), true);
-    assert.equal(q.current().key, 'cam1|intrusion');
+    assert.equal(q.current().key, 'cam1|tampering');
     // Acknowledge on that group sends every id in it, so the camera's siren
     // cut-off (pending until all its siren events are acked) can clear
     assert.deepEqual(q.ids(q.current().key), [2, 4]);
@@ -224,7 +236,7 @@ test('queueList: after reload, unacked non-ringing popups are queued; only ringi
 
     // a reload of the same list doesn't pop again
     assert.equal(queueList(q, list), false);
-    assert.deepEqual(q.ids('cam1|intrusion'), [2, 4]);
+    assert.deepEqual(q.ids('cam1|tampering'), [2, 4]);
 
     // acks seen in a later list leave the queue
     const acked = list.map((e) => ({...e, acknowledged_at: '2026-10-19T10:05:00Z'}));
@@ -235,16 +247,16 @@ test('queueList: after reload, unacked non-ringing popups are queued; only ringi
 test('Incidents: groupOf finds the group of an event id', () => {
     const q = new Incidents();
     q.add(ev({id: 1}));
-    q.add(ev({id: 2, use_case: 'fire'}));
+    q.add(ev({id: 2, use_case: 'baby_crying'}));
     q.add(ev({id: 3}));
     const g = q.groupOf(1);
-    assert.equal(g.key, 'cam1|intrusion');
+    assert.equal(g.key, 'cam1|tampering');
     assert.deepEqual(g.events.map((x) => x.id), [1, 3]);
     assert.equal(g.latest.id, 3);
-    assert.equal(q.groupOf(2).key, 'cam1|fire');
+    assert.equal(q.groupOf(2).key, 'cam1|baby_crying');
     assert.equal(q.groupOf(99), null);
     g.events.push(ev({id: 50})); // a copy
-    assert.deepEqual(q.ids('cam1|intrusion'), [1, 3]);
+    assert.deepEqual(q.ids('cam1|tampering'), [1, 3]);
 });
 
 test('Incidents: groups by camera and use case, newest group first', () => {
@@ -254,32 +266,32 @@ test('Incidents: groups by camera and use case, newest group first', () => {
 
     q.add(ev({id: 1}));
     q.add(ev({id: 2}));
-    q.add(ev({id: 4, camera: 'cam2', use_case: 'fire', label: 'smoke'}));
-    assert.equal(q.current().useCase, 'fire');
+    q.add(ev({id: 4, camera: 'cam2', use_case: 'baby_crying', label: 'crying'}));
+    assert.equal(q.current().useCase, 'baby_crying');
     assert.equal(q.current().camera, 'cam2');
-    assert.equal(q.current().key, 'cam2|fire');
+    assert.equal(q.current().key, 'cam2|baby_crying');
     assert.equal(q.others(), 1);
 
     q.add(ev({id: 3}));
     const cur = q.current();
-    assert.equal(cur.key, 'cam1|intrusion');
-    assert.equal(cur.useCase, 'intrusion');
+    assert.equal(cur.key, 'cam1|tampering');
+    assert.equal(cur.useCase, 'tampering');
     assert.equal(cur.events.length, 3);
     assert.deepEqual(cur.events.map((e) => e.id), [1, 2, 3]);
     assert.equal(cur.latest.id, 3);
-    assert.deepEqual(q.ids('cam1|intrusion'), [1, 2, 3]);
+    assert.deepEqual(q.ids('cam1|tampering'), [1, 2, 3]);
     assert.deepEqual(q.ids('nope'), []);
 
     const acked = {acknowledged_at: '2026-10-19T10:01:00Z'};
     q.update(ev({id: 1, ...acked}));
-    assert.deepEqual(q.ids('cam1|intrusion'), [2, 3]);
+    assert.deepEqual(q.ids('cam1|tampering'), [2, 3]);
     q.update(ev({id: 2, ...acked}));
     q.update(ev({id: 3, ...acked}));
-    assert.equal(q.current().useCase, 'fire');
+    assert.equal(q.current().useCase, 'baby_crying');
     assert.equal(q.others(), 0);
-    assert.deepEqual(q.ids('cam1|intrusion'), []);
+    assert.deepEqual(q.ids('cam1|tampering'), []);
 
-    q.update(ev({id: 4, camera: 'cam2', use_case: 'fire', label: 'smoke', ...acked}));
+    q.update(ev({id: 4, camera: 'cam2', use_case: 'baby_crying', label: 'crying', ...acked}));
     assert.equal(q.current(), null);
 });
 
@@ -294,32 +306,32 @@ test('Incidents: ignores feed-only and acknowledged events', () => {
 test('Incidents: update replaces in place and never adds or reorders', () => {
     const q = new Incidents();
     q.add(ev({id: 1}));
-    q.add(ev({id: 2, camera: 'cam2', use_case: 'fire', label: 'smoke'}));
+    q.add(ev({id: 2, camera: 'cam2', use_case: 'baby_crying', label: 'crying'}));
 
     // a late snapshot for the older group must not steal the popup
     q.update(ev({id: 1, snapshot: '/snap/1.jpg'}));
-    assert.equal(q.current().useCase, 'fire');
+    assert.equal(q.current().useCase, 'baby_crying');
     assert.equal(q.others(), 1);
-    q.update(ev({id: 2, camera: 'cam2', use_case: 'fire', label: 'smoke', snapshot: '/snap/2.jpg'}));
+    q.update(ev({id: 2, camera: 'cam2', use_case: 'baby_crying', label: 'crying', snapshot: '/snap/2.jpg'}));
     assert.equal(q.current().latest.snapshot, '/snap/2.jpg');
 
     // an unknown id is ignored
     q.update(ev({id: 99, camera: 'cam3'}));
     assert.equal(q.others(), 1);
-    assert.deepEqual(q.ids('cam3|intrusion'), []);
+    assert.deepEqual(q.ids('cam3|tampering'), []);
 });
 
 test('Incidents: update that changes group or popup re-files the event', () => {
     const q = new Incidents();
     q.add(ev({id: 1}));
     q.add(ev({id: 2}));
-    q.add(ev({id: 3, camera: 'cam2', use_case: 'fire', label: 'smoke'}));
+    q.add(ev({id: 3, camera: 'cam2', use_case: 'baby_crying', label: 'crying'}));
 
-    // id 1 now reports cam3: it leaves cam1|intrusion and is added as cam3|intrusion
+    // id 1 now reports cam3: it leaves cam1|tampering and is added as cam3|tampering
     q.update(ev({id: 1, camera: 'cam3'}));
-    assert.deepEqual(q.ids('cam1|intrusion'), [2]);
-    assert.equal(q.current().key, 'cam3|intrusion');
-    assert.deepEqual(q.ids('cam3|intrusion'), [1]);
+    assert.deepEqual(q.ids('cam1|tampering'), [2]);
+    assert.equal(q.current().key, 'cam3|tampering');
+    assert.deepEqual(q.ids('cam3|tampering'), [1]);
     assert.equal(q.others(), 2);
 
     // same group, but no longer a popup: it leaves the queue
@@ -327,7 +339,7 @@ test('Incidents: update that changes group or popup re-files the event', () => {
     assert.deepEqual(q.ids('cam1|vehicle_lpr'), [4]);
     q.update(ev({id: 4, use_case: 'vehicle_lpr', label: 'plate', data: {}}));
     assert.deepEqual(q.ids('cam1|vehicle_lpr'), []);
-    assert.equal(q.current().key, 'cam3|intrusion');
+    assert.equal(q.current().key, 'cam3|tampering');
 });
 
 test('Incidents: re-adding an id replaces that event in place', () => {
@@ -342,14 +354,14 @@ test('Incidents: re-adding an id replaces that event in place', () => {
 
     // re-added as acknowledged: it leaves the queue
     q.add(ev({id: 2, acknowledged_at: '2026-10-19T10:01:00Z'}));
-    assert.deepEqual(q.ids('cam1|intrusion'), [1]);
+    assert.deepEqual(q.ids('cam1|tampering'), [1]);
 });
 
 test('Incidents: current() does not expose the internal list', () => {
     const q = new Incidents();
     q.add(ev({id: 1}));
     q.current().events.push(ev({id: 7}));
-    assert.deepEqual(q.ids('cam1|intrusion'), [1]);
+    assert.deepEqual(q.ids('cam1|tampering'), [1]);
 });
 
 test('summarize', () => {
@@ -359,7 +371,7 @@ test('summarize', () => {
     const yesterday23 = new Date(2026, 9, 18, 23, 0, 0).getTime();
     const events = [
         ev({id: 1, time: at(now - 30 * 60000)}),
-        ev({id: 2, camera: 'cam2', use_case: 'fire', label: 'smoke', time: at(now - 3 * 3600000),
+        ev({id: 2, camera: 'cam2', use_case: 'baby_crying', label: 'crying', time: at(now - 3 * 3600000),
             acknowledged_at: at(now - 2 * 3600000)}),
         ev({id: 3, time: at(yesterday23)}),
         ev({id: 4, use_case: 'occupancy', label: 'count', time: at(now - 10 * 60000)}),
@@ -369,7 +381,7 @@ test('summarize', () => {
         const s = summarize(events, n);
         assert.equal(s.alertsToday, 2);
         assert.equal(s.unacked, 2); // ids 1 and 3; 2 is acknowledged, 4 is not a popup
-        assert.deepEqual(s.perUseCase, {intrusion: 1, fire: 1});
+        assert.deepEqual(s.perUseCase, {tampering: 1, baby_crying: 1});
         assert.equal(s.timeline.length, 12);
         assert.equal(s.timeline[11], 1);
         assert.equal(s.timeline[8], 1);
@@ -400,7 +412,7 @@ test('summarize: DST fall-back hour (America/New_York)', (t) => {
     const code = `
         const {summarize, timelineHours} = await import(${JSON.stringify(new URL('../cctv-logic.js', import.meta.url).href)});
         const now = Date.parse('2026-11-01T06:30:00Z');
-        const ev = (time) => ({id: 1, camera: 'cam1', use_case: 'intrusion', label: 'person', confidence: 0.9, time});
+        const ev = (time) => ({id: 1, camera: 'cam1', use_case: 'tampering', label: 'person', confidence: 0.9, time});
         const s = summarize([
             ev('2026-11-01T06:10:00Z'), // 01:10 EST, current hour
             ev('2026-11-01T05:40:00Z'), // 01:40 EDT, previous hour
@@ -442,82 +454,6 @@ test('barFractions: the tallest bar is 1, an empty hour is 0', () => {
     assert.deepEqual(barFractions([3]), [1]);
     assert.deepEqual(barFractions([0, 0, 1]), [0, 0, 1]);
     assert.deepEqual(barFractions([]), []);
-});
-
-test('simulated', () => {
-    const cams = ['cam1', 'cam2'];
-    const a = simulated(0, cams);
-    assert.equal(a.use_case, 'intrusion');
-    assert.equal(a.camera, 'cam1');
-    assert.ok(boxOf(a));
-    assert.ok(a.label);
-    assert.ok(a.data.area);
-    assert.ok(a.data.detail);
-    assert.ok(a.confidence > 0.5 && a.confidence <= 1);
-    assert.equal(simulated(1, cams).camera, 'cam2');
-
-    const cycle = [0, 1, 2, 3, 4, 5].map((i) => simulated(i, cams).use_case);
-    assert.deepEqual(cycle,
-        ['intrusion', 'restricted_area', 'fire', 'tampering', 'face_recognition', 'vehicle_lpr']);
-    assert.equal(simulated(6, cams).use_case, 'fall');
-    assert.deepEqual([6, 7, 8, 9].map((i) => simulated(i, cams).use_case),
-        ['fall', 'baby_crying', 'power_when_absent', 'occupancy']);
-
-    const face = simulated(4, cams);
-    assert.equal(face.label, 'unknown_face');
-    assert.equal(describe(face).popup, true);
-    const car = simulated(5, cams);
-    assert.equal(car.label, 'plate');
-    assert.match(car.data.plate, /^[A-Z]{2}\d{2}[A-Z]{1,2}\d{4}$/);
-    assert.equal(describe(car).popup, true);
-
-    for (let i = 0; i < 12; i++) {
-        const s = simulated(i, cams);
-        assert.deepEqual(simulated(i, cams), s, 'deterministic');
-        if (s.use_case !== 'occupancy') assert.equal(describe(s).popup, true);
-        assert.ok(s.confidence >= 0 && s.confidence <= 1);
-        for (const k of ['id', 'time', 'snapshot', 'acknowledged_at', 'siren']) {
-            assert.ok(!(k in s), k);
-        }
-    }
-
-    assert.equal(simulated(3, []).camera, 'cam1');
-    assert.equal(simulated(3).camera, 'cam1');
-    assert.equal(simulated(3, 'cam9').camera, 'cam1');
-    assert.equal(simulated(3, null).camera, 'cam1');
-
-    // a negative i still cycles: -1 is the last use case and the last camera
-    const neg = simulated(-1, ['cam1', 'cam2', 'cam3']);
-    assert.equal(neg.use_case, 'occupancy');
-    assert.equal(neg.camera, 'cam3');
-    assert.equal(simulated(-6, cams).use_case, 'face_recognition');
-
-    // each call returns fresh objects
-    simulated(0, cams).data.box[0] = 0.99;
-    assert.deepEqual(simulated(0, cams), a);
-});
-
-test('simulated: picks a camera configured for the use case', () => {
-    // as in /api/cctv/status: cam2 has no restricted_area, nobody has fire
-    const cams = [
-        {name: 'cam1', use_cases: ['intrusion', 'restricted_area', 'tampering']},
-        {name: 'cam2', use_cases: ['intrusion', 'vehicle_lpr', 'face_recognition', 'tampering']},
-    ];
-    for (let i = 0; i < 24; i++) {
-        const s = simulated(i, cams);
-        const fit = cams.filter((c) => c.use_cases.includes(s.use_case)).map((c) => c.name);
-        if (fit.length) assert.ok(fit.includes(s.camera), `${i}: ${s.use_case} on ${s.camera}`);
-        else assert.equal(s.camera, ['cam1', 'cam2'][i % 2], `${i}: round-robin for ${s.use_case}`);
-    }
-    assert.equal(simulated(1, cams).camera, 'cam1'); // restricted_area: only cam1
-    assert.equal(simulated(7, cams).camera, 'cam2');
-    assert.equal(simulated(5, cams).camera, 'cam2'); // vehicle_lpr: only cam2
-    // a use case on several cameras takes turns between them
-    assert.deepEqual([0, 6, 12, 18].map((i) => simulated(i, cams).camera), ['cam1', 'cam1', 'cam1', 'cam1']);
-
-    // no use cases known (status not loaded yet, or bad entries): round-robin by name
-    assert.equal(simulated(1, [{name: 'cam1'}, {name: 'cam2', use_cases: 'x'}]).camera, 'cam2');
-    assert.equal(simulated(1, [null, {name: ''}, {name: 'cam3', use_cases: []}]).camera, 'cam3');
 });
 
 test('occupancyNow: newest count per camera and zone', () => {

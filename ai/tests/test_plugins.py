@@ -11,11 +11,23 @@ from cctv_ai.worker import run_plugin
 
 USE_CASES = {
     "intrusion", "tampering", "face_recognition", "restricted_area", "fall",
-    "occupancy", "power_when_absent", "fire", "vehicle_lpr", "baby_crying",
+    "occupancy", "power_when_absent", "vehicle_lpr", "baby_crying",
 }
 
 
 class TestSlots(unittest.TestCase):
+    def test_worker_has_exactly_the_seven_enabled_use_cases(self):
+        selected = {
+            "fall", "baby_crying", "face_recognition", "vehicle_lpr", "tampering",
+            "occupancy", "power_when_absent",
+        }
+        enabled = {name for name, cls in discover().items() if cls.enabled}
+        self.assertEqual(enabled, selected)
+
+    def test_fire_is_not_discovered(self):
+        """Fire/smoke was removed from the selected integration scope."""
+        self.assertNotIn("fire", discover())
+
     def test_all_slots_present(self):
         found = discover()
         self.assertTrue(USE_CASES <= set(found), USE_CASES - set(found))
@@ -73,7 +85,7 @@ class TestExampleMotion(unittest.TestCase):
 
 class TestEventJSON(unittest.TestCase):
     def test_matches_go_format(self):
-        e = Event(camera="cam1", use_case="fire", label="smoke", confidence=0.7)
+        e = Event(camera="cam1", use_case="baby_crying", label="crying", confidence=0.7)
         d = e.to_json()
         self.assertEqual(set(d), {"camera", "use_case", "label", "confidence", "time"})
         datetime.fromisoformat(d["time"])

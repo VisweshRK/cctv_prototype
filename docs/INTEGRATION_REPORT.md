@@ -1,123 +1,67 @@
 # CCTV all-use-cases integration report
 
-Date: 2026-11-17  
-Branch: `integration/all-usecases`  
-Base: `origin/main` at `bc73b65`
+Date: 2026-11-18
+Branch: `integration/all-usecases`
 
-## Outcome
+## Current outcome
 
-The branch preserves main's Go/API/frontend structure and the `cctv_ai.plugin.Plugin` / `Event` contract. It integrates the compatible use-case branches in the requested order, ports the three applicable implementations from the unrelated platform branch, updates the dashboard logic and tests, and changes the worker to prefer fresh frames and asynchronous event delivery.
+The local website is running at [http://localhost:1984/cctv.html](http://localhost:1984/cctv.html). The dashboard loaded in a browser and showed both configured cameras online, seven configured use cases, and an online AI worker. This is a local link for this computer and network; it is not a public deployment URL.
 
-## Merged and ported work
+This branch integrates the seven use cases specified by the pasted requirements: `fall`, `baby_crying`, `face_recognition`, `vehicle_lpr`, `tampering`, `occupancy`, and `power_when_absent`. Fire/smoke is out of scope per that specification. Each case has its own latest-frame inference lane so a slow case cannot hold the other cases' lane queues or the Go camera viewer. Each lane keeps one running frame and one replaceable pending frame; stale pending frames are dropped.
 
-1. `origin/usecase/face_recognition` was merged as commit `8e19a40`. This added the face-recognition and vehicle-LPR implementations, their model helpers/tests, and the required Python dependencies. The test bench remains a separate development tool and is not part of the production ports.
-2. `origin/usecase/occupancy` was merged as `e6c4fd4`. Its corrected tracker helpers were retained, including `union`, IoU, and containment handling. The shared contract and tests were combined without retaining broad ignore rules that hid test assets.
-3. `origin/usecase/fall` was merged as `38a2ec7`. Occupancy's tracker implementation was retained, while fall's detector/tracker exception isolation was kept in the worker.
-4. `origin/sanjaym83786-hash-patch-1` was reviewed but not wired. Its intrusion file is a standalone FastAPI/Ultralytics RTSP application, not a `Plugin` subclass and not compatible with the main event, zone, or worker contract.
-5. `origin/use-cases-fd,bc,es` was not merged. It has unrelated history and a separate FastAPI/Vite/`StandardAIEvent` architecture. Fire, baby crying, and power-when-absent were ported selectively into main's plugin contract as commit `d2e1155`; its API, database, auth, frontend, binaries, hardcoded paths, and duplicate platform implementations were not imported.
-6. `tampering` was already represented by main and required no additional merge.
+## Live readiness check
 
-## Ported use cases
+At the live health snapshot taken on 2026-11-18, both cameras reported online and the worker reported online. Readiness was:
 
-- **Fire:** HSV flame/smoke signals, temporal persistence, and cooking-zone awareness; emits normalized frontend fields such as `area`, `detail`, and `box` where available.
-- **Baby crying:** 16 kHz audio processing with RMS/harmonic fallback and optional YAMNet ONNX support; maintains episode start/end state rather than flooding one event per audio chunk.
-- **Power when absent:** tracked-object absence hysteresis, appliance ROIs, frame-based appliance signals, wattage/reference estimates, and re-arming; emits `watts`, `minutes`, and/or `kwh` for the dashboard energy panel.
+| Use case | State | Live requirement / remaining setup |
+| --- | --- | --- |
+| Fall | Ready | MoveNet pose model loaded |
+| Occupancy | Ready | Running on both camera streams |
+| Tampering | Ready | Running on both camera streams |
+| Vehicle LPR | Ready | OCR models loaded; OCR is gated on detected vehicle crops |
+| Face recognition | Degraded | Face models loaded; enroll people in Face gallery and build the gallery |
+| Power when absent | Degraded | Configure appliance regions/ROIs for the camera views |
+| Baby crying | Disabled | Neither camera stream delivered audio frames during the check |
 
-No model weights, secrets, `.env` files, or binaries were added.
+The worker metrics snapshot reported capture at 9.8 FPS for cam1 and 4.5 FPS for cam2, with no queued or dropped work in the displayed case lanes. These are point-in-time capture numbers, not a sustained latency benchmark or a claim that every case was detection-validated. The dashboard showed live occupancy and tampering/fall events; an alert can also be a false positive and should be reviewed against the camera scene. No known-positive face, plate, crying-audio, or appliance-power scenario was available for a full accuracy test.
 
-## Conflict and contract decisions
+To use face recognition, open **Face gallery** in the dashboard, add a person and several clear face photos, then build/refresh the gallery. To use power-when-absent, draw/configure appliance ROIs in `ai/zones.yaml` and restart the worker. Baby-crying requires a camera stream that provides audio; this current feed did not. The gallery API is restricted to loopback requests.
 
-- Main's directory layout and plugin discovery mechanism were preserved.
-- The occupancy tracker fix won the shared-file conflict.
-- Detector/tracker failures remain isolated so a broken model does not terminate other use cases.
-- The canonical intrusion and restricted-area slots remain the main-contract implementations; the standalone intrusion server was not adopted.
-- Frontend event fields continue to use normalized `data.box`, `data.area`/`data.zone`, `data.detail`, occupancy `data.count`, and energy `data.kwh` or `data.watts` plus `data.minutes`.
+## Verification run
 
-## Frontend changes
+Commands/results from this session:
 
-`www/cctv-logic.js` now exercises all ten use cases in its simulation cycle, including fall, baby crying, power-when-absent, and occupancy. Simulation confidence is clamped to `[0, 1]`, missing boxes are handled safely, and camera selection falls back to an available camera when no camera is configured for a use case. Existing popup, acknowledgement, siren, snapshot, incident grouping, timeline, occupancy, and energy helpers remain covered. The dashboard continues to update existing streams rather than recreating `<video-stream>` elements.
+```text
+cd ai && .venv\Scripts\python.exe -m unittest discover -s tests
+147 tests passed
 
-## Worker performance changes
+node --test "www/tests/*.test.mjs"
+34 tests passed
 
-The previous synchronous HTTP-frame / synchronous event-POST path was changed as follows:
-
-- Each camera has a daemon RTSP capture thread with a one-frame OpenCV buffer. It overwrites stale frames instead of allowing a queue to grow.
-- The HTTP JPEG endpoint remains a fallback when no newer RTSP frame is available, which keeps fake/test-camera operation possible.
-- Shared object detection and tracking still run once per selected frame for all object plugins.
-- Event delivery uses a bounded non-blocking queue and a sender thread, so slow HTTP, snapshot, or siren handling does not block capture/inference. Queue overflow is logged and drops are explicit.
-- Plugin and detector/tracker durations are logged at DEBUG level; capture FPS is logged periodically at INFO; final queue/drop counts are logged on shutdown.
-- Models are loaded in plugin setup where supported, and plugin/detector exceptions are isolated.
-
-A controlled before/after camera benchmark was not available in this sandbox: there were no real RTSP cameras and no representative hardware/model workload. Therefore no numeric latency improvement is claimed. The implementation provides the intended latest-frame/drop mechanism and runtime metrics needed for deployment measurement.
-
-## Verification performed
-
-Commands actually run on this branch:
-
-```bash
-cd ai && python -m unittest discover -s tests
-```
-
-Result: **134 tests passed, 7 skipped**. Skips are model-asset-dependent tests; the output also showed expected missing optional MoveNet/face model notices.
-
-```bash
-cd ai && python -m unittest tests.test_ported_plugins -v
-```
-
-Result: **3 tests passed** covering fire persistence/frontend fields, baby-crying episode lifecycle, and power-when-absent re-arming.
-
-```bash
-node --test 'www/tests/*.test.mjs'
-```
-
-Result: **34 tests passed**. Node emitted only the existing module-type warning for the vanilla frontend test setup.
-
-```bash
 go test ./internal/cctv/...
+passed (run with local-loopback test access)
+
+PowerShell AST parse of scripts/run.ps1
+syntax OK
+
+git diff --check
+passed
 ```
 
-Result: **passed**.
+The full Python suite took 316.953 seconds. The Node runner emitted the existing package module-type warning. The initial Go test attempt was blocked by the sandbox's loopback socket restriction; rerunning with the required local-test access passed.
 
-```bash
-go build ./...
-```
+The browser smoke check verified the rendered dashboard, camera-online indicators, configured-case count, worker readiness display, and live alert feed. A controlled sustained throughput/latency test and known-positive detection tests for all seven use cases remain unperformed because those require labeled test scenes/audio and ROI/gallery configuration.
 
-Result: **passed earlier during integration**.
+## Runtime and safety notes
 
-```bash
-go vet ./...
-```
+- Camera URLs and credentials remain in `.env` and were not copied into this report or source output.
+- Model assets and the local face gallery are not committed.
+- `scripts/run.ps1` provides local startup and stop commands; it rejects port 1984 if another listener is already present.
+- The current website is served from this machine. `localhost` works only on this computer; another device would require a reachable host address and network/firewall configuration.
+- Do not present the seven-case integration as fully validated: three cases are presently blocked by missing user-specific setup/audio, and four only have readiness plus live pipeline evidence.
 
-Result: **not clean because of pre-existing go2rtc-tree vet findings outside `internal/cctv`**, including legacy `ReadByte`/`WriteByte` signatures, non-constant `fmt.Errorf` strings, undefined symbols in existing tests, unkeyed third-party structs, and unreachable code. This command was run and its failures were not caused by the CCTV integration changes.
+## Camera reconnection retest — 2026-11-22
 
-A full hardware/browser E2E run was not possible because this sandbox had no live cameras, production stream service, optional model weights, or browser device. The unit/integration coverage uses fake frames/audio and contract-level event propagation; deployment still needs a two-camera RTSP smoke test.
+ONVIF discovery found the camera on the local network and enumerated four profiles using the saved camera login. The ignored local `.env` was updated to the discovered address, then the Go2RTC dashboard and AI worker were restarted. The dashboard returned HTTP 200; cam1 and cam2 both reported online and the worker reported online. The post-reconnect capture snapshot was approximately 12.5 FPS for cam1 and 12.6 FPS for cam2.
 
-## Known limitations and follow-up
-
-- Face recognition and vehicle LPR remain silent until their model/gallery assets are downloaded and configured.
-- Baby crying can use YAMNet when `ai/models/yamnet.onnx` exists; otherwise its documented harmonic fallback is used.
-- Power-when-absent needs appliance ROIs calibrated for each camera.
-- Optional model availability and camera/audio quality affect detection accuracy.
-- `go vet ./...` still requires cleanup in unrelated upstream go2rtc packages before it can be a repository-wide gate.
-- A real before/after latency measurement and browser E2E test remain deployment tasks requiring cameras and a running browser-capable environment.
-
-## Exact full-system startup commands
-
-From the repository root, create/configure `.env` from `.env.example`, install the AI requirements, and ensure FFmpeg is on `PATH`.
-
-Terminal 1:
-
-```bash
-go build -o go2rtc .
-./go2rtc
-```
-
-Terminal 2:
-
-```bash
-cd ai
-python -m cctv_ai.worker --list
-python -m cctv_ai.worker -v --cameras cam1,cam2
-```
-
-Open `http://localhost:1984/` for the dashboard. Use `python -m cctv_ai.worker --plugins <comma-separated-slots> --cameras cam1` to isolate a test run. Model download helpers write only to ignored model directories; never commit weights, camera URLs, credentials, or generated recordings.
+Live readiness remained four ready cases (fall, occupancy, tampering, and vehicle LPR). Face recognition still needs gallery enrollment; power-when-absent still needs appliance ROIs; baby-cry detection is disabled because neither stream produced audio frames. These are setup/input limitations, not camera connectivity failures.

@@ -70,8 +70,10 @@ class Plugin(Base):
         if model_path:
             pose_est = PoseEstimator(model_path=model_path)
             self.detector = FallDetector(pose_estimator=pose_est, persistence_seconds=2.0)
+            self.pose_ready = True
         else:
             self.detector = FallDetector(persistence_seconds=2.0)
+            self.pose_ready = False
 
     def on_frame(self, camera: str, frame: np.ndarray, ts: datetime) -> list[Event]:
         """Backward compatibility for legacy runner calling on_frame."""

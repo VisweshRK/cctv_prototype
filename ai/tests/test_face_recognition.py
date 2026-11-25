@@ -114,6 +114,33 @@ class TestPluginEvents(unittest.TestCase):
         # the same visit must not be announced again while the face stays in view
         self.assertEqual(plugin._events_for("cam1", "cam1:visit1", ended=False), [])
 
+    def test_rebuilt_gallery_reloads_while_worker_is_running(self):
+        import tempfile
+        from plugins.face_recognition import Plugin
+
+        class Engine:
+            names = []
+            means = None
+            def load_gallery(self, _path):
+                self.names = ["alice"]
+                self.means = np.ones((1, 128), np.float32)
+                return 1
+
+        plugin = Plugin()
+        plugin.ready = True
+        plugin.people_known = 0
+        plugin.engine = Engine()
+        with tempfile.TemporaryDirectory() as folder:
+            plugin.gallery_path = Path(folder) / "faces.npz"
+            plugin.gallery_mtime_ns = -1
+            np.savez(plugin.gallery_path, names=np.array(["alice"]), means=np.ones((1, 128), np.float32))
+            plugin._refresh_gallery()
+            self.assertEqual(plugin.people_known, 1)
+            plugin.gallery_path.unlink()
+            plugin._refresh_gallery()
+            self.assertEqual(plugin.people_known, 0)
+            self.assertIsNone(plugin.engine.means)
+
 
 class TestGallery(unittest.TestCase):
     def test_trim_mean_ignores_outliers_per_dimension(self):

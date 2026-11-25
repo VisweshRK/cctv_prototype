@@ -22,7 +22,7 @@ go2rtc must be running (http://localhost:1984). ffmpeg must be on PATH for H.264
 .venv\Scripts\python -m cctv_ai.worker -v
 ```
 ```bash
-.venv\Scripts\python -m cctv_ai.worker --plugins example_motion,intrusion --cameras cam1
+.venv\Scripts\python -m cctv_ai.worker --plugins tampering,occupancy --cameras cam1
 ```
 
 | Option | Default | Meaning |
@@ -38,25 +38,26 @@ go2rtc must be running (http://localhost:1984). ffmpeg must be on PATH for H.264
 - One capture thread per camera continuously reads the go2rtc RTSP restream with a one-frame buffer;
   it overwrites the previous frame, so inference never builds a latency queue. HTTP JPEG is only a
   fallback for synthetic/test cameras.
-- The inference loop shares the latest frame across plugins. A plugin with a slower `interval` is called
-  less often, and stale frames are dropped rather than processed late.
+- Each case has a separate inference lane. A slow case keeps at most one pending frame; new work replaces
+  stale pending work so OCR or face inference cannot hold up sibling cases. The dashboard's Go stream
+  remains a separate process from model inference.
 - Event POSTs use a bounded asynchronous sender queue. A slow API, snapshot, or siren operation cannot
   block capture or inference; queue drops are logged.
 - Cameras that `/api/cctv/status` reports offline are skipped (checked every 5 s).
 - Audio is read from go2rtc's RTSP restream (`rtsp://localhost:8554/<camera>`) as 16 kHz mono
   int16, in 1 s chunks, so the camera keeps a single connection.
 - If a plugin or the shared detector raises an exception it is logged and the other plugins keep running.
-- INFO metrics include queue drops and plugin timings when verbose diagnostics are enabled; keep model
-  thread counts bounded so ONNX/OpenCV cannot starve go2rtc.
+- Native OpenMP/BLAS threads are limited to one per worker process. INFO logs include capture rate and
+  per-case timing. `GET /api/cctv/health` reports model and configuration readiness.
 
 ## Enabled use cases
 
-The integrated branch enables `tampering`, face recognition, vehicle LPR, fall, occupancy, fire,
-baby crying, and power-when-absent. Face and vehicle plugins remain silent until their downloaded
-models/gallery are present. Fire and the baby-crying harmonic fallback need no weights; baby crying
-will use YAMNet when `ai/models/yamnet.onnx` exists. Configure appliance ROIs with
-`power_when_absent.Plugin.configure_rois()` or deployment configuration. Intrusion and restricted-area
-remain canonical main slots and are not replaced by the unrelated standalone FastAPI intrusion patch.
+The worker defaults to these seven requested use cases: `fall`, `baby_crying`, `face_recognition`,
+`vehicle_lpr`, `tampering`, `occupancy`, and `power_when_absent`. `/api/cctv/health` reports missing
+models and configuration as degraded/disabled. Face recognition needs YuNet/SFace plus an enrolled
+gallery. Baby crying needs a supported camera audio track and YAMNet; the present harmonic fallback is
+approximate and is explicitly marked degraded. Fall detection needs MoveNet for pose confirmation.
+Configure appliance ROIs before expecting energy alerts. Intrusion and restricted-area remain dormant slots.
 
 ## Test bench
 
@@ -92,7 +93,7 @@ from cctv_ai.plugin import Plugin as Base
 
 
 class Plugin(Base):
-    use_case = "intrusion"   # same as the folder name
+    use_case = "tampering"   # same as the folder name
     enabled = True
     needs = {"video"}        # or {"audio"}, or add "objects"
     interval = 1.0           # seconds between calls per camera

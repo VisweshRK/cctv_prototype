@@ -8,6 +8,7 @@ import time
 import numpy as np
 from cctv_ai.plugin import Event, Plugin as Base
 log = logging.getLogger("cctv_ai.baby_crying")
+BABY_CRY_CLASS_INDEX = 20  # YAMNet AudioSet label: "Baby cry, infant cry"
 
 class Plugin(Base):
     use_case = "baby_crying"
@@ -46,8 +47,8 @@ class Plugin(Base):
         if self.session is not None and self.input_name:
             try:
                 out = self.session.run(None, {self.input_name: x})[0]
-                if out.ndim >= 2 and out.shape[-1] >= 22:
-                    return float(np.max(out[..., [20, 21]])), rms
+                if out.ndim >= 2 and out.shape[-1] > BABY_CRY_CLASS_INDEX:
+                    return float(np.max(out[..., BABY_CRY_CLASS_INDEX])), rms
             except Exception:
                 pass
         if rms < 0.02 or x.size < 8:

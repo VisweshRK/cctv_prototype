@@ -7,9 +7,6 @@
 
 // The spec table, in one place. Label overrides live in describe().
 export const USE_CASES = {
-    intrusion: {severity: 'critical', title: 'Burglary alarm · intrusion', popup: true, siren: true},
-    restricted_area: {severity: 'critical', title: 'Breach · restricted area', popup: true, siren: true},
-    fire: {severity: 'critical', title: 'Fire / smoke detected', popup: true, siren: true},
     fall: {severity: 'high', title: 'Person fell', popup: true, siren: false},
     tampering: {severity: 'high', title: 'Camera tampering / offline', popup: true, siren: false},
     baby_crying: {severity: 'medium', title: 'Baby crying', popup: true, siren: false},
@@ -24,7 +21,6 @@ const HOUR = 3600000;
 
 const dataOf = (e) => (e && e.data) || {};
 const nonEmpty = (v) => typeof v === 'string' && v !== '';
-const mod = (a, n) => ((a % n) + n) % n; // never negative, unlike %
 
 /**
  * An event time in ms, or NaN. Go writes nanoseconds; only milliseconds are
@@ -370,54 +366,4 @@ export function energyWaste(events, now, tariff = TARIFF) {
     for (const c of cameras) c.rupees = c.kwh * tariff;
     const kwh = cameras.reduce((a, c) => a + c.kwh, 0);
     return {kwh, rupees: kwh * tariff, times: cameras.reduce((a, c) => a + c.times, 0), cameras};
-}
-
-// What "Simulate alert" cycles through: one popup event per use case.
-const CYCLE = [
-    {use_case: 'intrusion', label: 'person', confidence: 0.91,
-        data: {area: 'Main gate', detail: '1 person crossed the perimeter line', box: [0.42, 0.28, 0.58, 0.86]}},
-    {use_case: 'restricted_area', label: 'person', confidence: 0.88,
-        data: {area: 'Server room door', detail: '1 person in zone for 6 s', box: [0.18, 0.22, 0.36, 0.9]}},
-    {use_case: 'fire', label: 'smoke', confidence: 0.84,
-        data: {area: 'Kitchen', detail: 'Smoke over 15% of the view', box: [0.55, 0.05, 0.95, 0.5]}},
-    {use_case: 'tampering', label: 'lens_covered', confidence: 0.95,
-        data: {area: 'Whole view', detail: 'View blocked for 10 s', box: [0.05, 0.05, 0.95, 0.95]}},
-    {use_case: 'face_recognition', label: 'unknown_face', confidence: 0.86,
-        data: {area: 'Reception', detail: 'Face not in the known list', box: [0.45, 0.2, 0.57, 0.42]}},
-    {use_case: 'vehicle_lpr', label: 'plate', confidence: 0.9,
-        data: {area: 'Main gate', plate: 'TN09BX4821', detail: 'Car entering, plate read', box: [0.38, 0.62, 0.56, 0.74]}},
-    {use_case: 'fall', label: 'fall', confidence: 0.93,
-        data: {area: 'Living room', detail: 'Person down for 3 s', box: [0.28, 0.42, 0.65, 0.94]}},
-    {use_case: 'baby_crying', label: 'crying', confidence: 0.89,
-        data: {area: 'Audio', detail: 'Baby crying detected'}},
-    {use_case: 'power_when_absent', label: 'power_wasted', confidence: 0.88,
-        data: {area: 'Room', detail: 'Power on with nobody present', minutes: 12, watts: 110, kwh: 0.022}},
-    {use_case: 'occupancy', label: 'count', confidence: 1,
-        data: {zone: 'room', count: 2, detail: '2 people present'}},
-];
-
-/**
- * A POST /api/cctv/events body like an AI worker would send, deterministic
- * per i. The server fills id and time.
- *
- * cameras are {name, use_cases} as in /api/cctv/status (a plain name also
- * works). The event goes to a camera configured for its use case, taking
- * turns if there are several; if none is, round-robin over all of them.
- */
-export function simulated(i, cameras) {
-    const cams = (Array.isArray(cameras) ? cameras : [])
-        .map((x) => (typeof x === 'string' ? {name: x} : x))
-        .filter((x) => x && nonEmpty(x.name));
-    const c = CYCLE[mod(i, CYCLE.length)];
-    const fit = cams.filter((x) => Array.isArray(x.use_cases) && x.use_cases.includes(c.use_case));
-    const camera = fit.length ? fit[mod(Math.floor(i / CYCLE.length), fit.length)].name
-        : cams.length ? cams[mod(i, cams.length)].name : 'cam1';
-    const wobble = mod(i * 7, 5) / 100; // 0..0.04, so repeated alerts differ a bit
-    return {
-        camera,
-        use_case: c.use_case,
-        label: c.label,
-        confidence: Math.min(1, Math.round((c.confidence + wobble - 0.02) * 100) / 100),
-        data: {...c.data, ...(c.data.box ? {box: [...c.data.box]} : {})},
-    };
 }

@@ -54,17 +54,18 @@ class Plugin(Base):
         self.engine = FaceEngine(root / "ai" / "models", self.detection_threshold)
         self.ready = self.engine.load_models()
         self.people_known = 0
+        self.gallery_path = root / "data" / "faces.npz"
+        self.gallery_mtime_ns = -1
         if self.ready:
-            gallery = root / "data" / "faces.npz"
-            if gallery.exists():
+            if self.gallery_path.exists():
                 try:
-                    self.people_known = self.engine.load_gallery(gallery)
+                    self.people_known = self.engine.load_gallery(self.gallery_path)
+                    self.gallery_mtime_ns = self.gallery_path.stat().st_mtime_ns
                     log.info("face gallery loaded: %d known people", self.people_known)
                 except Exception as err:
-                    log.warning("cannot load %s: %s", gallery, err)
+                    log.warning("cannot load face gallery: %s", err)
             else:
-                log.warning("no gallery at %s; everyone will be unknown "
-                            "(run plugins.face_recognition.build_gallery)", gallery)
+                log.warning("face gallery is empty; enroll people in the main dashboard")
         self.votes: dict[str, FaceVote] = {}  # track id -> vote history
         self.snapshots: dict[str, str | None] = {}  # track id -> best face crop
         self.last_seen: dict[str, float] = {}  # demo visit id -> monotonic time
@@ -72,6 +73,28 @@ class Plugin(Base):
         self.announced: dict[str, float] = {}  # demo camera:name -> time
         self.reported: set[str] = set()  # visits already announced
         self.visits = 0
+
+    def _refresh_gallery(self) -> None:
+        """Pick up a gallery rebuild without restarting live capture."""
+        if not self.ready:
+            return
+        try:
+            mtime = self.gallery_path.stat().st_mtime_ns
+        except FileNotFoundError:
+            if self.gallery_mtime_ns != -1:
+                self.engine.names = []
+                self.engine.means = None
+                self.people_known = 0
+                self.gallery_mtime_ns = -1
+            return
+        if mtime == self.gallery_mtime_ns:
+            return
+        try:
+            self.people_known = self.engine.load_gallery(self.gallery_path)
+            self.gallery_mtime_ns = mtime
+            log.info("face gallery reloaded: %d known people", self.people_known)
+        except Exception as err:
+            log.warning("face gallery reload failed; keeping the previous gallery: %s", err)
 
     # ---- shared helpers -------------------------------------------------
 
@@ -162,6 +185,7 @@ class Plugin(Base):
         return best_id
 
     def on_frame(self, camera: str, frame: np.ndarray, ts: datetime) -> list[Event]:
+        self._refresh_gallery()
         if not self.ready or not self.people_known:
             return []
         now = time.monotonic()

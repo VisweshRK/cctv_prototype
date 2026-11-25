@@ -16,7 +16,7 @@ from cctv_ai.plugin import Event, Plugin as Base
 
 class Plugin(Base):
     use_case = "example_motion"
-    enabled = True
+    enabled = False  # reference plugin only; production runs the seven selected cases
     needs = {"video"}
     interval = 1.0
 

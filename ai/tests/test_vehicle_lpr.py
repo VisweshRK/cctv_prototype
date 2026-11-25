@@ -8,8 +8,12 @@ the package or the sample plate image is missing.
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from collections import deque
+import numpy as np
 
+from cctv_ai.objects import TrackedObject
 from plugins.vehicle_lpr import plates
+from plugins.vehicle_lpr import Plugin as LprPlugin, VehicleObjectTracker
 from plugins.vehicle_lpr.clustering import PlateRead, best_plate, cluster_reads
 
 SAMPLE_PLATE = Path(__file__).resolve().parents[0] / "test_images" / "plate_sample.png"
@@ -115,6 +119,45 @@ class TestClustering(unittest.TestCase):
 
     def test_empty(self):
         self.assertIsNone(best_plate([]))
+
+
+class TestCandidateGating(unittest.TestCase):
+    def test_ocr_runs_only_for_vehicle_candidates(self):
+        class OCR:
+            def __init__(self): self.calls = 0
+            def detect_text(self, _crop):
+                self.calls += 1
+                return []
+
+        plugin = LprPlugin()
+        plugin.ready = True
+        plugin.ocr = OCR()
+        plugin.reads = {"cam1": deque(maxlen=plugin.max_reads)}
+        plugin.already_read = set()
+        frame = np.zeros((200, 300, 3), dtype=np.uint8)
+        ts = datetime.now(timezone.utc)
+        person = TrackedObject("person1", "person", (10, 10, 80, 190), 0.9, 0.9, True)
+        plugin.on_objects("cam1", frame, ts, [person], [])
+        self.assertEqual(plugin.ocr.calls, 0)
+        car = TrackedObject("car1", "car", (40, 40, 280, 180), 0.8, 0.8, True)
+        plugin.on_objects("cam1", frame, ts, [car], [])
+        self.assertEqual(plugin.ocr.calls, 1)
+
+    def test_vehicle_candidate_tracker_keeps_identity_and_ends_stale_tracks(self):
+        tracker = VehicleObjectTracker(max_missed=2)
+        ts = datetime.now(timezone.utc)
+        detection = {"label": "car", "box": (10, 10, 210, 110), "score": 0.9}
+        active, ended = tracker.update("cam1", [detection], ts)
+        self.assertEqual(len(active), 1)
+        self.assertEqual(ended, [])
+        track_id = active[0].id
+        active, ended = tracker.update("cam1", [{**detection, "box": (12, 10, 212, 110)}], ts)
+        self.assertEqual(active[0].id, track_id)
+        self.assertEqual(ended, [])
+        tracker.update("cam1", [], ts)
+        active, ended = tracker.update("cam1", [], ts)
+        self.assertEqual(active, [])
+        self.assertEqual([obj.id for obj in ended], [track_id])
 
 
 class TestKnownPlates(unittest.TestCase):
@@ -271,6 +314,22 @@ class TestOCROnSample(unittest.TestCase):
         text, conf = lines[0][1], lines[0][2]
         self.assertGreater(conf, 0.8)
         self.assertEqual(plates.normalize(text), "TN09AB1234")
+
+    def test_vehicle_candidate_crop_emits_a_confirmed_plate(self):
+        import cv2
+        import numpy as np
+
+        plugin = LprPlugin()
+        plugin.setup(["cam1"])
+        if not plugin.ready:
+            self.skipTest("rapidocr-onnxruntime not installed")
+        image = cv2.imdecode(np.fromfile(str(SAMPLE_PLATE), np.uint8), cv2.IMREAD_COLOR)
+        h, w = image.shape[:2]
+        vehicle = TrackedObject("cam1-vehicle1", "car", (0, 0, w, h), 0.9, 0.9, True)
+        events = []
+        for _ in range(plugin.confirm_reads):
+            events.extend(plugin.on_objects("cam1", image, datetime.now(timezone.utc), [vehicle], []))
+        self.assertTrue(any(e.data.get("plate") == "TN09AB1234" for e in events), events)
 
 
 if __name__ == "__main__":
